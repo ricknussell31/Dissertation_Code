@@ -1,0 +1,161 @@
+---
+jupyter:
+  jupytext:
+    text_representation:
+      extension: .Rmd
+      format_name: rmarkdown
+      format_version: '1.2'
+      jupytext_version: 1.4.2
+  kernelspec:
+    display_name: Python 3
+    language: python
+    name: python3
+---
+
+```{python}
+from scipy import *
+import numpy as np
+from numpy.fft import fft, fftshift, fftfreq
+import matplotlib.pyplot as plt
+import matplotlib.animation
+import Methods.Deposition as DM
+import Methods.PDESolver as PM
+import Methods.Plotting as PL
+import profile
+
+# %matplotlib notebook
+
+# #%load_ext Cython
+```
+
+# Figure 4.3
+
+This figure shows the evolution of plankton density and a chemical, as the plankton performs autochemotaxis. We simulate the following PDE system:
+
+$$ \rho_{tt} + \rho_{t} = \rho_{xx} - \frac{\partial}{\partial x} \left[ \frac{c_x}{\sqrt{c_x^2 + \delta^2}} \rho \right]$$
+$$c_t = d_1 c_{xx} - d_2 c + f(c) \rho$$
+
+where $\rho(x,t)$ is the plankton density, $c(x,t)$ is the chemical concentration, $\delta$ is a run-and-tumble parameter, $d_1$ is the diffusion of the chemical, $d_2$ is the diffusion of the chemical, and $f(c)$ is the deposition function i.e. how much chemical the plankton produce. 
+
+As well, this performs Fourier analysis on the plankton density, by showing the magnitude of the wave numbers in the Fourier domain. Define $E(k,t_0) = \text{Re} \left\lbrace\mathcal{F}\left[\rho(x,t_0)\right](k)\right\rbrace$, where $\mathcal{F}$ is the Fourier transform. We then plot $E(K)$ to show the most unstable wave number
+
+
+The variables for the 1D system include:
+
+depFcn - The deposition function from Methods.Deposition that will be performing the autochemotaxis. You have currently three option of constantDep, atanDep, and linAtanDep (see Figure 3 or /Methods/Deposition for more info)
+
+left - the left endpoint for the spatial regime (keep at 0 for now until next update) 
+
+right - the right endpoint for the spatial regime 
+
+d1 - the diffusion rate for the chemical 
+
+d2 - the decay rate for the chemical 
+
+N - the number of nodes for the spatial mesh 
+
+dt - the timestep for the temporal mesh 
+
+Parameters for $f(c)$:
+
+depMaxstr - the maximum output of chemical in the system for the plankton 
+
+depThreshold - the amount of chemical to activate the 'switch' in the deposition function 
+
+depTransWidth - the relaxation parameter for the smoothness of the 'switch' deposition function 
+
+delta - for the approximation of $\text{sgn}(c_x)\approx \dfrac{c_x}{\sqrt{c_x^2 + \delta^2}}$
+
+```{python}
+Swimmers = PM.PlankChem(depFcn=DM.constantDep,left=0,right=5,d1=.2,d2=4,N=417,
+                        dt=0.004,depMaxStr=0.01, depThreshold=0.15, depTransWidth=0.05, delta = 0.015)
+
+
+NonDTime = 100 #The total non-dimensional time the simulation will run for
+TotalTime = int(NonDTime/Swimmers.dt) #Total number of timesteps for the experiment
+c0 = .2 #Initial Constant Value of Chemical for the experiment
+Swimmers.CheckStability(c0) #checks the stability of the system. Do not comment out#
+```
+
+```{python}
+##################################################
+# This code runs the 1D coupled system of equations #                     
+# with c as the chemical, which diffuses and decays #
+# throughout the system, and which p, the total plankton #
+# performs autochemotaxis in regards to this chemical. #
+
+# CA - TotalTime x N+1 array for evolution of the chemical #
+# PA - TotalTime x N+1 array for evolution of the plankton #
+# CT - TotalTime x 1 array for total amount of chemical in the system #
+# PT - TotalTime x 1 array for total plankton in the system #
+#################################################
+
+
+#set up chemical, plankton, and totals
+CA, PA, CT, PT = Swimmers.initial_conditionsSO(const=c0, steps=TotalTime)
+
+#perturb the initial solution
+CA[1,:], PA[1,:], CT[1], PT[1] = Swimmers.firstStepSO(CA[0,:],PA[0,:])
+
+#Complete the iterations necessary
+for i in range(1, len(CT)-1):
+    CA[i+1,:], PA[i+1,:], CT[i+1], PT[i+1] = Swimmers.SecondOrder(CA[i,:],PA[i,:],PA[i-1,:])
+```
+
+```{python}
+fig, axs = plt.subplots(nrows=3, ncols=5,figsize=(26,12),tight_layout=True,sharey='row')
+
+K = 8 #Closest integer to most unstable wave number
+
+freq = (len(Swimmers.xm)*2*pi/(Swimmers.right-Swimmers.left))*fftfreq(len(Swimmers.xm)) #Creates modes for FT
+
+Times = [0,4,8,15,99.99]
+
+
+axs[0,0].set_ylabel(r'Plankton Density', fontsize=19, color='r')
+axs[1,0].set_ylabel(r'Chemical concentration',fontsize=19,color='b')
+axs[2,0].set_ylabel(r'$E(k)$',fontsize=25,color='g')
+
+for i in range(len(Times)):
+    t = int(Times[i]/Swimmers.dt)
+    #Plot Plankton
+    axs[0,i].plot(Swimmers.xm,PA[t],color='r',linewidth=2.5)
+    
+    #Plot Chemical
+    axs[1,i].plot(Swimmers.xm,CA[t],color='b',linewidth=2.5)
+
+    #Plot Fourier Transform
+    omega = fft(CA[t])
+    axs[2,i].plot(fftshift(freq),np.real(fftshift(omega)),color='g',linewidth=2.5)
+    
+    #Formatting
+    axs[2,i].axvline(x=K,linestyle='dashed',color='k',linewidth=2.5) #Plot dotted lines at most unstable wave number
+    axs[2,i].axvline(x=-K,linestyle='dashed',color='k',linewidth=2.5) #Plot dotted lines at most unstable wave number
+    
+    axs[0,i].ticklabel_format(style='sci', scilimits=(2,2),axis='y',useMathText=True)
+    axs[1,i].ticklabel_format(style='sci', scilimits=(-1,-1),axis='y',useMathText=True)
+    axs[2,i].ticklabel_format(style='sci', scilimits=(0,0),axis='y',useMathText=True)
+    axs[0,i].yaxis.get_offset_text().set_fontsize(15)
+    axs[1,i].yaxis.get_offset_text().set_fontsize(15)
+    
+    axs[0,i].set_xlim(0,Swimmers.right)
+    axs[1,i].set_xlim(0,Swimmers.right)
+    axs[2,i].set_xlim(-20,20)
+
+    axs[0,i].set_ylim(0,max(PA[-1])+10)
+    axs[1,i].set_ylim(0e-1,5e-1)
+    axs[2,i].set_ylim(-1,5)
+
+    axs[0,i].set_xlabel(r'$x$',fontsize=25)
+    axs[1,i].set_xlabel(r'$x$',fontsize=25)
+    axs[2,i].set_xlabel(r'$k$',fontsize=25)
+    
+    axs[0,i].set_title(r'$t = {0}$'.format(round(Times[i])),fontsize=30)
+    for j in range(3):
+        axs[j,i].ticklabel_format(style='plain',axis='x')
+        axs[j,i].locator_params(nbins=3,axis='y')
+        axs[j,i].locator_params(nbins=5,axis='x')
+        axs[j,i].tick_params(labelsize=15)
+        
+plt.savefig('./Figures/Fig4_3.png')
+```
