@@ -1,0 +1,263 @@
+---
+jupyter:
+  jupytext:
+    text_representation:
+      extension: .Rmd
+      format_name: rmarkdown
+      format_version: '1.2'
+      jupytext_version: 1.4.2
+  kernelspec:
+    display_name: Python 3
+    language: python
+    name: python3
+---
+
+```{python}
+from scipy import *
+import numpy as np
+import matplotlib.pyplot as plt
+import Methods.Deposition as DM
+# %matplotlib notebook
+```
+
+# Figure 3.2: 1D Stability Analysis
+
+This code deals with stability analyis in Section 4, regarding the characteristic equation for $\lambda$
+
+$$    \lambda^3 +\left[ d_1 k^2 - d_3 + 1\right] \lambda^2 + \left[ (d_1 + 1)k^2 - d_3 \right] \lambda + k^2 \left( d_1 k^2 - d_3 - \frac{\overline{c} d_2}{\delta}\right) = 0,$$
+
+where $d_3 = f'(\overline{c}) \overline{\rho} - d_2$. To see combinations of parameters make the constant solutions stable or unstable, we take the solution set of roots $\{ \lambda_1(k), \lambda_2(k), \lambda_3(k)\}$ and define $R = R(k) := \max \{\text{Re}\left(\lambda_i\right)\}_{i =1}^3$. Let $k_u$ be the most unstable wave number, i.e. 
+
+$$ \DeclareMathOperator*{\argmax}
+ {arg\,max}k_u = \argmax\limits_{k > 0} R(k)
+$$
+
+If $k_u > \frac{2 \pi}{\ell}$, the set of parameters will make $(\overline{c}, \overline{\rho})$ unstable in the domain length $\ell$. Given a fixed set of parameters $d_1, d_2, \overline{c}, \delta$ and deposition function $f(c)$, we can vary $k$ to find the most unstable wave number.
+
+We explore different ways to visualize this.
+
+
+## Figure 4a
+
+This calculates the function $R(k)$ with varied $k$ and $d_1$, while keeping $d_2$ constant. Note the asymptote at $R(k) = -1/2$ as $k \to \infty$. 
+
+```{python}
+plt.figure(figsize=(7.6,5.4),tight_layout=True)
+d1Array = [0.4,0.8,1.2,1.6,2] #Values of d1 to be simulated (diffusion constant)
+colors = ['#648FFF','#785EF0','#DC267F','#FE6100','#FFB000'] #Using IBM Colorblind Scheme 
+markers = ['o','p','s','^','D']
+params = {'legend.fontsize': 15,'legend.framealpha':1}
+plt.rcParams.update(params)
+
+c = 0.12 #Constant chemical solution
+d2 = 1 #Decay constant
+delta = 0.01 #Run-and-Tumble parameter
+K = 6 #Largest wave number to Test
+
+for i in range(len(d1Array)):
+    d1 = d1Array[i]
+    wave = np.linspace(0,K,K*20)
+    realpart = np.zeros(len(wave))
+    for f in range(0,len(wave)):
+        p = d2*c/(DM.atanDep(c,0.01,0.05,.03)) #Calculate rho bar
+        fp = (DM.atanDep(c+0.0001,0.01,0.05,.03) - DM.atanDep(c-0.0001,0.01,0.05,.03))/(2*(0.0001)) #Approximate f'(c)
+        d3 = p*fp - d2
+        k = wave[f]
+        c1 = d1*k**2 - d3 + 1 #quadratic coefficent
+        c2 = (d1 + 1)*k**2 - d3 #linear coefficient
+        c3 = (k**2)*(d1*k**2 - d3 - c*d2/delta) #constant term
+        CubicRoots = np.roots([1,c1,c2,c3]) #calculate roots of monic cubic
+        for m in range(0, 3): #Find maximal real root
+            if (m == 0):
+                realpart[f] = CubicRoots[m].real
+            elif (CubicRoots[m].real > realpart[f]):
+                realpart[f] = CubicRoots[m].real
+    plt.plot(wave,realpart,label=r'$d_1 = {0}$'.format(d1),color=colors[i],marker=markers[i],markevery=K,linewidth=2.4)
+    i = i + 1
+plt.plot(wave, np.zeros(len(wave)),color='black',linewidth=2) #Plot R(k) = 0
+plt.plot(wave, np.zeros(len(wave))-1/2,color='black',linestyle='--',linewidth=2) #Plot R(k) = -1/2, the asymptote
+plt.xlabel(r'$k$',fontsize=28)
+plt.ylabel(r'$R(k)$',fontsize=28,labelpad=-10)
+plt.title(r'Maximal Real Part of Roots: $d_2 = 1$', fontsize=20)
+plt.legend(loc=0)
+plt.xlim(0,K)
+#plt.ylim(-1,0.5)
+plt.tick_params(labelsize=18)
+plt.yticks([-1,-0.5,0,0.5])
+plt.show()
+plt.savefig('./Figures/Fig3_2a')
+```
+
+## Figure 3.2b
+
+This calculates the function $R(k)$ with varied $k$ and $d_2$, while keeping $d_1$ constant. Note the asymptote at $R(k) = -1/2$ as $k \to \infty$.
+
+```{python}
+plt.figure(figsize=(7.6,5.4),tight_layout=True)
+d2Array = [0.4,0.8,1.2,1.6,2] #Values of d2 to be simulated (decay constant)
+colors = ['#648FFF','#785EF0','#DC267F','#FE6100','#FFB000'] #Using IBM Colorblind Scheme 
+markers = ['o','p','s','^','D']
+params = {'legend.fontsize': 15,'legend.framealpha':1}
+
+c = 0.12 #Constant chemical solution
+d1 = 1 #Diffusion constant
+delta = 0.01 #Run-and-Tumble parameter
+K = 6 #Largest wave number to Test
+
+for i in range(len(d2Array)):
+    d2 = d2Array[i]
+    wave = np.linspace(0,K,K*20)
+    realpart = np.zeros(len(wave))
+    for f in range(0,len(wave)):
+        p = d2*c/(DM.atanDep(c,0.01,0.05,.03)) #Calculate rho bar
+        fp = (DM.atanDep(c+0.0001,0.01,0.05,.03) - DM.atanDep(c-0.0001,0.01,0.05,.03))/(2*(0.0001)) #Approximate f'(c)
+        d3 = p*fp - d2
+        k = wave[f]
+        c1 = d1*k**2 - d3 + 1 #quadratic coefficent
+        c2 = (d1 + 1)*k**2 - d3 #linear coefficient
+        c3 = (k**2)*(d1*k**2 - d3 - c*d2/delta) #constant term
+        CubicRoots = np.roots([1,c1,c2,c3]) #calculate roots of monic cubic
+        for m in range(0, 3): #Find maximal real root
+            if (m == 0):
+                realpart[f] = CubicRoots[m].real
+            elif (CubicRoots[m].real > realpart[f]):
+                realpart[f] = CubicRoots[m].real
+                
+    plt.plot(wave,realpart,label=r'$d_2 = {0}$'.format(d2),color=colors[i],marker=markers[i],markevery=K,linewidth=2.4)
+    i = i + 1
+plt.plot(wave, np.zeros(len(wave)),color='black',linewidth=2) #Plot R(k) = 0
+plt.plot(wave, np.zeros(len(wave))-1/2,color='black',linestyle='--',linewidth=2) #Plot R(k) = -1/2, the asymptote
+plt.xlabel(r'$k$',fontsize=28)
+plt.ylabel(r'$R(k)$',fontsize=28,labelpad=-10)
+plt.title(r'Maximal Real Part of Roots: $d_1 = 1$', fontsize=20)
+plt.legend(loc=0)
+plt.xlim(0,K)
+plt.ylim(-1,0.5)
+plt.yticks([-1,-0.5,0,0.5])
+plt.tick_params(labelsize=18)
+plt.show()
+plt.savefig('./Figures/Fig3_2b.png')
+```
+
+## Figure 3.2c
+
+We now want to calculate regimes in $d_1-d_2$ space where the selected parameters will make the constant steady state solution unstable at a given domain length $\ell$. To do this, we run through various $d_1$ and $d_2$ values while keeping all others constant. In the following two figures, we show what occurs when our run-and-tumble parameter, $\delta$, changes slightly while keeping $\ell = 6$, $\overline{c} = 0.12$, $f(c) = f_2(c)$.
+
+The first plot, figure 3.2c, will show $\delta = 0.01$. 
+
+```{python}
+d1Array = np.linspace(0,1,250) #Values for d1, the diffusion parameter
+d2Array = np.linspace(0,1,250) #Values for d2, the decay parameter
+stableMat = np.zeros((len(d1Array),len(d2Array))) #Matrix with most unstable wave number
+
+c = 0.12 #Chemical steady state
+fp = (DM.atanDep(c+0.0001,0.01,0.05,.03) - DM.atanDep(c-0.0001,0.01,0.05,.03))/(2*(0.0001)) #Approximate f'(c)
+delta = 0.01 #Run-and-Tumble parameter
+
+L = 6 #Length of Domain to test stability
+wave = np.linspace(0,(2*pi+1)/L,150) #Wave numbers to test (need end point to be greater than L/(2*pi))
+
+for i in range(len(d1Array)):
+    for j in range(len(d2Array)):
+        max0=0
+        d1 = d1Array[i]
+        d2 = d2Array[j]
+        realpart = np.zeros(len(wave))
+        for f in range(0,len(wave)):
+            p = d2*c/(DM.atanDep(c,0.01,0.05,.03)) #Calculate rho bar
+            d3 = p*fp - d2
+            k = wave[f]
+            c1 = d1*k**2 - d3 + 1 #quadratic coefficent
+            c2 = (d1 + 1)*k**2 - d3 #linear coefficient
+            c3 = (k**2)*(d1*k**2 - d3 - c*d2/delta) #constant term
+            CubicRoots = np.roots([1,c1,c2,c3]) #calculate roots of monic cubic
+            for m in range(0, 3): #Find maximal real root
+                if (CubicRoots[m].real > max0):
+                    max0 = CubicRoots[m].real
+                    stableMat[i,j] = k
+```
+
+```{python}
+StableLine = [] #Find border between unstable regions
+for i in range(len(d1Array)):
+    MM = 0
+    for j in range(len(d2Array)):
+        if (stableMat[i,j] > (2*pi)/L and MM==0):#Given d_1, find first d2 such that the system is unstable
+            StableLine.append(d2Array[j])
+            MM=1
+            
+fig, ax = plt.subplots(figsize=(7.6,5.4),tight_layout=True)
+ax.fill_between(d1Array[:len(StableLine)],StableLine,1,facecolor='green')
+ax.set_xlabel(r'$d_1$',fontsize=25)
+ax.set_xlim(0,1)
+ax.set_ylabel(r'$d_2$',fontsize=25)
+ax.set_ylim(0,1)
+ax.locator_params(nbins=5)
+ax.tick_params(labelsize=18)
+ax.set_title('Stability Regions for $\ell = {0}$, $\delta = {1}$'.format(L,delta), fontsize = 20)
+ax.text(.22,.62,'Unstable',color='White',fontsize=25)
+ax.text(.62,.2,'Stable',color='Black',fontsize=25)
+
+plt.savefig('./Figures/Fig3_2c.png')
+```
+
+## Figure 3.2d
+
+In the same spirit as 3.2c, Figure 3.2d now uses all the same parameters but utilizes $\delta = 0.012$. Note the regions that now become stable. 
+
+```{python}
+d1Array = np.linspace(0,1,250) #Values for d1, the diffusion parameter
+d2Array = np.linspace(0,1,250) #Values for d2, the decay parameter
+stableMat2 = np.zeros((len(d1Array),len(d2Array))) #Matrix with most unstable wave number
+
+c = 0.12 #Chemical steady state
+fp = (DM.atanDep(c+0.0001,0.01,0.05,.03) - DM.atanDep(c-0.0001,0.01,0.05,.03))/(2*(0.0001)) #Approximate f'(c)
+delta = 0.012 #Run-and-Tumble parameter
+
+L = 6 #Length of Domain to test stability
+wave = np.linspace(0,(2*pi+1)/L,150) #Wave numbers to test (need end point to be greater than (2*pi)/L)
+
+for i in range(len(d1Array)):
+    for j in range(len(d2Array)):
+        max0=0
+        d1 = d1Array[i]
+        d2 = d2Array[j]
+        realpart = np.zeros(len(wave))
+        for f in range(0,len(wave)):
+            p = d2*c/(DM.atanDep(c,0.01,0.05,.03)) #Calculate rho bar
+            d3 = p*fp - d2
+            k = wave[f]
+            c1 = d1*k**2 - d3 + 1 #quadratic coefficent
+            c2 = (d1 + 1)*k**2 - d3 #linear coefficient
+            c3 = (k**2)*(d1*k**2 - d3 - c*d2/delta) #constant term
+            CubicRoots = np.roots([1,c1,c2,c3]) #calculate roots of monic cubic
+            for m in range(0, 3): #Find maximal real root
+                if (CubicRoots[m].real > max0):
+                    max0 = CubicRoots[m].real
+                    stableMat2[i,j] = k
+```
+
+```{python}
+delta = 0.012
+StableLine = [] #Find border between unstable regions
+for i in range(len(d1Array)):
+    MM = 0
+    for j in range(len(d2Array)):
+        if (stableMat2[i,j] > (2*pi)/L and MM==0): #Given d_1, find first d2 such that the system is unstable
+            StableLine.append(d2Array[j])
+            MM=1
+            
+fig, ax = plt.subplots(figsize=(7.6,5.4),tight_layout=True)
+ax.fill_between(d1Array[:len(StableLine)],StableLine,1,facecolor='green')
+ax.set_xlabel(r'$d_1$',fontsize=25)
+ax.set_xlim(0,1)
+ax.set_ylabel(r'$d_2$',fontsize=25)
+ax.set_ylim(0,1)
+ax.locator_params(nbins=5)
+ax.tick_params(labelsize=18)
+ax.set_title('Stability Regions for $\ell = {0}$, $\delta = {1}$'.format(L,delta), fontsize = 20)
+ax.text(.05,.8,'Unstable',color='White',fontsize=25)
+ax.text(.5,.4,'Stable',color='Black',fontsize=25)
+
+plt.savefig('./Figures/Fig3_2d.png')
+```

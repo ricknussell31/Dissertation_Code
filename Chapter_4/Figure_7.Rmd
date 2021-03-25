@@ -1,0 +1,125 @@
+---
+jupyter:
+  jupytext:
+    text_representation:
+      extension: .Rmd
+      format_name: rmarkdown
+      format_version: '1.2'
+      jupytext_version: 1.4.2
+  kernelspec:
+    display_name: Python 3
+    language: python
+    name: python3
+---
+
+```{python}
+from scipy import *
+import numpy as np
+import matplotlib.pyplot as plt
+import matplotlib.animation
+import Methods.Deposition as DM
+import Methods.PDESolver as PM
+import Methods.Plotting as PL
+import profile
+
+# %matplotlib notebook
+
+# #%load_ext Cython
+```
+
+# Figure 7
+
+This figure compares the final steady state values of our system where move $\delta$
+
+$$ \rho_{tt} + \rho_{t} = \rho_{xx} - \frac{\partial}{\partial x} \left[ \frac{c_x}{\sqrt{c_x^2 + \delta^2}} \rho \right]$$
+$$c_t = d_1 c_{xx} - d_2 c + f(c) \rho$$
+
+where $\rho(x,t)$ is the plankton density, $c(x,t)$ is the chemical concentration, $\delta$ is a run-and-tumble parameter, $d_1$ is the diffusion of the chemical, $d_2$ is the diffusion of the chemical, and $f(c)$ is the deposition function i.e. how much chemical the plankton produce. 
+
+We choose to show non-constant steady states with $\delta = 0, 0.02, 0.04, 0.06$ to highlight the differences between the behavior.
+
+As well, to compare all simulations, we center all data around the maximum of the data. We accomplish this by using the CenterData function in our Plotting module. As $\delta \to 0$, we note that the peak of the aggregation gets more defined and at $\delta = 0$, we approach a steady state with two exponential functions stiched together. 
+
+```{python}
+deltas = np.array([0,.015,.03,.045])
+
+Planks = np.zeros((302,len(deltas)))
+Chems = np.zeros((302,len(deltas)))
+for k in range(len(deltas)):
+    Swimmers = PM.PlankChem(depFcn=DM.constantDep,left=0,right=5,d1=1,d2=2,N=301,
+                            dt=0.004,depMaxStr=0.01, depThreshold=0.05, depTransWidth=0.03, delta = deltas[k])
+
+    #Global parameters#
+
+    TotalTime = int(150/Swimmers.dt) #Total number of iterations for the experiment
+    c0 = .12 #Initial Constant Value of Chemical for the experiment
+    
+    #initialize system
+    CA, PA, CT, PT = Swimmers.initial_conditionsSO(const=c0, steps=TotalTime)
+    CA[1,:], PA[1,:], CT[1], PT[1] = Swimmers.firstStepSO(CA[0,:],PA[0,:])
+
+    #Complete the iterations necessary
+    for i in range(1, len(CT)-1):
+            CA[i+1,:], PA[i+1,:], CT[i+1], PT[i+1] = Swimmers.SecondOrder(CA[i,:],PA[i,:],PA[i-1,:])
+    
+    Planks[:,k] = PA[-1]
+    Chems[:,k] = CA[-1]
+```
+
+## Figure 7a
+
+This plots the steady state plankton density by centering the data around the largest point of the aggregation. 
+
+```{python}
+# %matplotlib notebook
+params = {'legend.fontsize': 14}
+plt.rcParams.update(params)
+
+fig, ax1 = plt.subplots(tight_layout=True)
+colors = ['#D55E00','#000000','#882255','#009E73']
+linestyles = ['-', '--', '-.', ':']
+for k in range(len(deltas)):
+    PAA, CAA = PL.CenterData(Swimmers,Planks[:,k],Chems[:,k])
+    xm = np.linspace(0,5,len(PAA))
+    ax1.plot(xm, PAA, color=colors[k],linestyle=linestyles[k],linewidth = 2.3,
+             label='$\delta = {0}$'.format(round(deltas[k],3)))
+    ax1.set_xlabel(r'$x$',fontsize=25)
+    ax1.set_ylabel(r'Plankton Density, $\rho$',fontsize=18)
+    ax1.set_xlim(Swimmers.left, Swimmers.right)
+ax1.locator_params(nbins=4,axis='y')
+ax1.ticklabel_format(style='sci', scilimits=(1,1),axis='y',useMathText=True)
+ax1.tick_params(labelsize=15)
+ax1.yaxis.get_offset_text().set_fontsize(15)
+ax1.set_title(r'Steady State: Plankton Density',fontsize=19)
+
+plt.legend(loc=1)
+plt.savefig('../Final_Figures/Fig7a')
+```
+
+```{python}
+fig, ax1 = plt.subplots(tight_layout=True)
+colors = ['#D55E00','#000000','#882255','#009E73']
+markers = ['o','+','|','*']
+linestyles = ['-', '--', '-.', ':']
+i = 0
+for k in range(len(deltas)):
+    PAA, CAA = PL.CenterData(Swimmers,Planks[:,k],Chems[:,k])
+    xm = np.linspace(0,5,len(CAA))
+    ax1.plot(xm, CAA, color=colors[k],linestyle=linestyles[k],linewidth = 2.3,
+             label='$\delta = {0}$'.format(round(deltas[k],3)))
+    ax1.set_xlabel(r'$x$',fontsize=25)
+    ax1.set_ylabel(r'Chemical Concentration, $c$',fontsize=18)
+    ax1.set_xlim(Swimmers.left, Swimmers.right)
+ax1.locator_params(nbins=4,axis='y')
+ax1.ticklabel_format(style='sci', scilimits=(-1,-1),axis='y',useMathText=True)
+ax1.tick_params(labelsize=15)
+ax1.yaxis.get_offset_text().set_fontsize(15)
+ax1.set_title(r'Steady State: Chemical',fontsize=19)
+
+plt.legend(loc=1)
+plt.savefig('../Final_Figures/Fig7b')
+```
+
+```{python}
+
+```

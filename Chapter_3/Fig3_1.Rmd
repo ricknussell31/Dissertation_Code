@@ -1,0 +1,54 @@
+---
+jupyter:
+  jupytext:
+    text_representation:
+      extension: .Rmd
+      format_name: rmarkdown
+      format_version: '1.2'
+      jupytext_version: 1.4.2
+  kernelspec:
+    display_name: Python 3
+    language: python
+    name: python3
+---
+
+```{python}
+from scipy import *
+import numpy as np
+import matplotlib.pyplot as plt
+import Methods.Deposition as DM
+# %matplotlib notebook
+```
+
+# Figure 3.1
+
+This code displays the various deposition functions that we utilize during our numerical experiments. 
+
+```{python}
+# %matplotlib notebook
+
+plt.figure(figsize=(7,5),tight_layout=True)
+c = np.linspace(0,.3,100)
+const = DM.constantDep(c,.01,.15,.013)
+atanDep = DM.atanDep(c,.01,.15,.013)
+linAtanDep = DM.linAtanDep(c,.01,.15,.013)
+
+plt.plot(c,const,color = '#000000', linestyle='--',linewidth = 4,label=r'$f_1(c)$')
+plt.plot(c,atanDep,color = '#009E73', linestyle='-',linewidth = 3,label=r'$f_2(c)$')
+plt.plot(c,linAtanDep,color = '#D55E00', linestyle=':',linewidth = 5,label=r'$f_3(c)$')
+
+plt.xticks([0,0.15],[r'$0$',r'$c_0$'],fontsize=30)
+plt.yticks([0,0.01],[0,r'$\gamma$'],fontsize=30)
+plt.xlim(0,.3)
+plt.ylim(-0.0001,.011)
+plt.legend(loc=5,fontsize=20)
+plt.ylabel(r'$f(c)$: Deposition Function',fontsize=19)
+plt.xlabel(r'Chemical Concentration, $c$',fontsize=19)
+plt.title(r'Examples of Deposition Functions',fontsize=19)
+plt.savefig('./Figures/Fig3_1.png')
+plt.show()
+```
+
+```{python}
+
+```
