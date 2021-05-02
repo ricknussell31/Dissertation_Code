@@ -1,0 +1,276 @@
+---
+jupyter:
+  jupytext:
+    text_representation:
+      extension: .Rmd
+      format_name: rmarkdown
+      format_version: '1.2'
+      jupytext_version: 1.4.2
+  kernelspec:
+    display_name: Python 3
+    language: python
+    name: python3
+---
+
+```{python}
+from scipy import *
+import numpy as np
+import FlockingMethods_Numba as FMN
+import FlockingMethods_Extra as FM
+from numba import int32, float32, float64, int64, njit, prange
+from numpy.random import rand, uniform
+from numpy import exp
+import matplotlib.pyplot as plt
+from scipy.signal import savgol_filter
+```
+
+```{python}
+@njit(parallel=True)
+def Update_Metric(posx,posy,velo,Dists,r,ep,v,N,L,eta,dt):
+    #This method allows us to update the flocking model with the Metric model
+    #Each new velocity is constructed by averaging over all of the velocities within
+    #the radius selected, self.r.
+    #Inputs -- x-coordinates, y-coordinates, trajectories for time = t
+    #Outputs -- x-coordinates, y-coordinates, trajectories for time = t + (delta t)
+
+    Vals = np.zeros((N,N),dtype=int64)
+    TotVals = np.zeros(N,dtype=int64)
+
+    for j in prange(N):
+        #find indicies that are within the radius
+        #Vals = np.zeros((N,N),dtype=int64)
+        #TotVals = np.zeros(N,dtype=int)
+        for i in prange(N):
+            if (Dists[j,i] <= r):
+                Vals[j,TotVals[j]] = i
+                TotVals[j] += 1
+    sint = np.zeros(N,dtype=float32)
+    cost = np.zeros(N,dtype=float32)
+    avgc = np.zeros(N,dtype=float32)
+    avgs = np.zeros(N,dtype=float32)
+
+    for j in prange(N):
+        #find average velocity of those inside the radius
+        for k in prange(TotVals[j]):
+            sint[j] += np.sin(velo[Vals[j,k]])
+            cost[j] += np.cos(velo[Vals[j,k]])
+        avgs[j] = sint[j]/TotVals[j]
+        avgc[j] = cost[j]/TotVals[j]
+
+    #construct the noise
+    noise = uniform(-eta/2,eta/2,N)
+    newvelo = np.zeros(N,dtype=float32)
+    velon = np.zeros(N,dtype=float32)
+    for j in prange(N):
+        newvelo[j] = np.arctan2(avgs[j],avgc[j])
+        velon[j] = np.mod(newvelo[j]+noise[j],2*np.pi)
+        posx[j] += dt*v*np.cos(velon[j])
+        posy[j] += dt*v*np.sin(velon[j]) 
+
+    posx = np.mod(posx,L)
+    posy = np.mod(posy,L)
+
+    return(posx,posy,velon)
+
+@njit(parallel=True)
+def Calc_Dist(posx,posy,L):
+    #find distance of every particle from particle j using periodic boundary conditions
+
+    Dists = np.zeros((len(posx),len(posy)),dtype=float32)
+    Dist0 = np.zeros((len(posx),len(posy)),dtype=float32)
+    Dist1 = np.zeros((len(posx),len(posy)),dtype=float32)
+    Dist2 = np.zeros((len(posx),len(posy)),dtype=float32)
+    Dist3 = np.zeros((len(posx),len(posy)),dtype=float32)
+    Dist4 = np.zeros((len(posx),len(posy)),dtype=float32)
+    Dist5 = np.zeros((len(posx),len(posy)),dtype=float32)
+    Dist6 = np.zeros((len(posx),len(posy)),dtype=float32)
+    Dist7 = np.zeros((len(posx),len(posy)),dtype=float32)
+    Dist8 = np.zeros((len(posx),len(posy)),dtype=float32)
+
+    for j in prange(len(posx)):
+
+        Dist0[:,j] = np.sqrt((posx[j] - posx)**2 + (posy[j] - posy)**2) #regular  
+        Dist1[:,j] = np.sqrt((posx[j]  - L - posx)**2 + (posy[j] - posy + L)**2) #topleft
+        Dist2[:,j] = np.sqrt((posx[j]  - posx)**2 + (posy[j] - posy + L)**2) #topcenter
+        Dist3[:,j] = np.sqrt((posx[j]  + L - posx)**2 + (posy[j] - posy + L)**2) #topright
+        Dist4[:,j] = np.sqrt((posx[j]  - L - posx)**2 + (posy[j] - posy)**2) #middleleft
+        Dist5[:,j] = np.sqrt((posx[j]  + L - posx)**2 + (posy[j] - posy)**2) #middleright
+        Dist6[:,j] = np.sqrt((posx[j]  - L - posx)**2 + (posy[j] - posy - L)**2) #bottomleft
+        Dist7[:,j] = np.sqrt((posx[j]  - posx)**2 + (posy[j] - posy - L)**2) #bottomcenter
+        Dist8[:,j] = np.sqrt((posx[j]  + L - posx)**2 + (posy[j] - posy - L)**2) #bottomright
+
+        for k in prange(len(Dist0)):
+            Dists[j,k] = min(Dist0[k,j],Dist1[k,j],Dist2[k,j],
+                    Dist3[k,j],Dist4[k,j],Dist5[k,j],
+                            Dist6[k,j],Dist7[k,j],Dist8[k,j])
+    return(Dists)
+```
+
+## Fig. 6.4a - Comparison of $g(r,t=5000)$ with varied $\eta$
+
+```{python}
+LL = 40
+NN = int(LL**2/2)
+R = 3
+Time = 5000
+
+Noises = [0.5,2,3,3.5,4.5,5.5]
+
+binsize = 1000
+Bins = np.zeros((len(Noises),binsize))
+
+loops = 300
+for i in range(len(Noises)):
+    Nois = Noises[i]
+    for M in range(loops):
+        SM = FMN.Particles(L=LL,N=NN,eta=Nois,k = 0,r=R,dt=1,v=0.5,time=Time,ep=1) #Set up the system
+        posx, posy, velo = SM.SetIC() #Initialize the x and y coordinates and the initial velocities
+
+        for d in range(1,SM.time):
+            Dists = Calc_Dist(posx[:,d-1],posy[:,d-1],SM.L) #Calculate the distance between each particle
+            #Update Positions and velocities using the Vicsek model
+            posx[:,d],posy[:,d],velo[:,d] = Update_Metric(posx[:,d-1],posy[:,d-1],velo[:,d-1],
+                                                                 Dists,SM.r,SM.ep,SM.v,SM.N,SM.L,SM.eta,SM.dt)
+
+        Vectors2 = FM.Particles(L=LL,N=NN,eta=Nois,k = 0, r=R,dt=1,time=Time,v=0.5, ep=1)
+
+        Dists2 = []
+        for j in range(NN):
+                Dists2 = np.append(Dists2,np.delete(Vectors2.Calc_Dist(posx[j:,-1],
+                                                                       posy[j:,-1],LL,0),0,0))
+        FN = np.histogram(Dists2,bins=binsize,range=(0.0001,LL),density=False)
+        Bins[i,:] += FN[0]
+    Area = 2*NN*pi/(LL**2)
+    Bins[i,:] = np.divide(Bins[r,:],(FN[1][1]-FN[1][0])*loops*Area*(FN[1][:-1]+FN[1][1:])/2*(NN-1)/2)
+```
+
+```{python}
+scale = 3
+fig, axs = plt.subplots(figsize=(7,5.4), tight_layout = True)
+
+colors = ['#DC267F','#FE6100','#FFB000','#009E73','#648FFF','#785EF0']
+markers = ['o','s','^','','','']
+
+W = 21
+p = 9
+K = 40
+
+Noises = [.5,2,3,3.5,4.5,5.5]
+
+lins=['-',':']
+
+for i in range(len(Noises)):    
+    RDF = Bins[i,:]
+    Length = np.linspace(0,20,int(len(RDF)/2))
+    RDFFilter = savgol_filter(RDF[:int(len(RDF)/2)],W,p,mode='nearest')
+    axs.plot(Length,RDFFilter,linewidth=2,linestyle='-',color=colors[i],marker=markers[i],
+             markevery=K,markersize=8,label='$\eta = {0}$'.format(Noises[i]))
+    
+axs.axvline(3,linewidth=1.3,color='k',linestyle='--',
+                alpha = .6,dash_capstyle='round')
+axs.axhline(1,linewidth=1.7,alpha=0.66,color='k',linestyle='--')
+
+axs.set_xlabel(r'Length',fontsize=20,labelpad=-1)
+axs.set_ylabel(r'$g(r,t=5000)$',fontsize=20,labelpad=-2)
+axs.set_title(r'$g(r,t=5000)$ for Varied $\eta$',fontsize=20)
+
+
+axs.set_xlim(0,20)
+axs.tick_params(labelsize=15)
+axs.locator_params(nbins=4,axis='x')
+axs.locator_params(nbins=4,axis='y')
+
+axs.legend(loc=0,prop={'size': 14},handlelength=2.5)
+plt.savefig('./Figures/Fig6_4a.png')
+```
+
+## Fig. 6.4b - Comparison between $g(R)$ and $\sigma$ for Varied $\eta$ 
+
+```{python}
+LL = 40
+NN = int(LL**2/2)
+R = 3
+Time = 5000
+
+Noises = [0,0.1,0.2,0.3,0.5,1,1.5,2,2.5,3,3.2,3.4,3.6,3.8,4,4.2,4.4,4.5,5,5.5,6,6.28]
+
+binsize = 1000
+Bins = np.zeros((len(Noises),binsize))
+OPS = np.zeros(len(Noises))
+loops = 300
+for i in range(len(Noises)):
+    Nois = Noises[i]
+    for M in range(loops):
+        SM = FMN.Particles(L=LL,N=NN,eta=Nois,k = 0,r=R,dt=1,v=0.5,time=Time,ep=1) #Set up the system
+        posx, posy, velo = SM.SetIC() #Initialize the x and y coordinates and the initial velocities
+
+        for d in range(1,SM.time):
+            Dists = Calc_Dist(posx[:,d-1],posy[:,d-1],SM.L) #Calculate the distance between each particle
+            #Update Positions and velocities using the Vicsek model
+            posx[:,d],posy[:,d],velo[:,d] = Update_Metric(posx[:,d-1],posy[:,d-1],velo[:,d-1],
+                                                                 Dists,SM.r,SM.ep,SM.v,SM.N,SM.L,SM.eta,SM.dt)
+            
+        #Calculate Order Parameter at t = 5000
+        vax = np.sum(np.cos([velo[:,-1]]))
+        vay = np.sum(np.sin([velo[:,-1]]))
+        OPS[i] += (1/SM.N)*np.sqrt(vax**2 + vay**2)
+
+        #Calculate RDF at t = 5000
+        Vectors2 = FM.Particles(L=LL,N=NN,eta=Nois,k = 0, r=R,dt=1,time=Time,v=0.5, ep=1)
+
+        Dists2 = []
+        for j in range(NN):
+                Dists2 = np.append(Dists2,np.delete(Vectors2.Calc_Dist(posx[j:,-1],
+                                                                       posy[j:,-1],LL,0),0,0))
+                
+        FN = np.histogram(Dists2,bins=binsize,range=(0.0001,LL),density=False)
+        Bins[i,:] += FN[0]
+    Area = 2*NN*pi/(LL**2)
+    Bins[i,:] = np.divide(Bins[i,:],(FN[1][1]-FN[1][0])*loops*Area*(FN[1][:-1]+FN[1][1:])/2*(NN-1)/2)
+    
+OPS = OPS/loops
+```
+
+```{python}
+scale = 3
+fig, axs = plt.subplots(figsize=(7,5.4), tight_layout = True)
+
+colors = ['#648FFF','#785EF0','#DC267F','#FE6100','#FFB000'] #Using IBM Colorblind Scheme 
+markers = ['o','^','s']
+
+W = 21
+p = 9
+Noises = [0,0.1,0.2,0.3,0.5,1,1.5,2,2.5,3,3.2,3.4,3.6,3.8,4,4.2,4.4,4.5,5,5.5,6,6.28]
+
+Length = np.linspace(0,20,binsize/2)
+Ri3 = np.argmin(np.abs(Length-3))
+
+Vals = []
+for i in range(len(Noises)):    
+    RDF = Bins[i,:]
+    RDFFilter = savgol_filter(RDF[:int(len(RDF)/2)],W,p,mode='nearest')
+    Vals = np.append(Vals,RDFFilter[Ri3])
+
+lns1 = axs.plot(Noises[1:],Vals[1:],color=colors[3],marker='D',linestyle='',label='$g(R)$',fillstyle='none',
+               markersize=6)
+
+lns2 = ax2.plot(Noises[1:],OPS[1:],color=colors[1],marker='o',linestyle='',label='$\sigma$',fillstyle='none',
+               markersize=6)
+
+axs.set_ylabel(r'$g(R)$ at $t = 5000$',fontsize=17,labelpad=-2,color=colors[3])
+axs.set_title(r'$\sigma$ and $g(R)$ at $t = 5000$: Varied $\eta$',fontsize=20)
+
+axs.set_xlabel(r'Noise, $\eta$',fontsize=17)
+ax2.set_ylabel('$\sigma$ at $t = 5000$',fontsize=17,color=colors[1])
+
+lns = lns1+lns2
+labs = [l.get_label() for l in lns]
+axs.legend(lns, labs, loc=0, prop={"size":19})
+
+axs.tick_params(labelsize=15)
+ax2.tick_params(labelsize=15)
+
+axs.set_xlim(-0.1,2*np.pi+0.1)
+
+plt.savefig('./Figures/Fig6_4b.png')
+```

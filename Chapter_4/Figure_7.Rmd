@@ -27,7 +27,7 @@ import profile
 # #%load_ext Cython
 ```
 
-# Figure 7
+# Figure 4.5
 
 This figure compares the final steady state values of our system where move $\delta$
 
@@ -41,18 +41,18 @@ We choose to show non-constant steady states with $\delta = 0, 0.02, 0.04, 0.06$
 As well, to compare all simulations, we center all data around the maximum of the data. We accomplish this by using the CenterData function in our Plotting module. As $\delta \to 0$, we note that the peak of the aggregation gets more defined and at $\delta = 0$, we approach a steady state with two exponential functions stiched together. 
 
 ```{python}
-deltas = np.array([0,.015,.03,.045])
+deltas = np.array([0,.02,.04,.06])
 
-Planks = np.zeros((302,len(deltas)))
-Chems = np.zeros((302,len(deltas)))
+Planks = np.zeros((418,len(deltas)))
+Chems = np.zeros((418,len(deltas)))
 for k in range(len(deltas)):
-    Swimmers = PM.PlankChem(depFcn=DM.constantDep,left=0,right=5,d1=1,d2=2,N=301,
-                            dt=0.004,depMaxStr=0.01, depThreshold=0.05, depTransWidth=0.03, delta = deltas[k])
+    Swimmers = PM.PlankChem(depFcn=DM.linAtanDep,left=0,right=5,d1=.6,d2=2,N=417,
+                            dt=0.004,depMaxStr=0.01, depThreshold=0.24, depTransWidth=0.04, delta = deltas[k])
 
     #Global parameters#
 
     TotalTime = int(150/Swimmers.dt) #Total number of iterations for the experiment
-    c0 = .12 #Initial Constant Value of Chemical for the experiment
+    c0 = .2 #Initial Constant Value of Chemical for the experiment
     
     #initialize system
     CA, PA, CT, PT = Swimmers.initial_conditionsSO(const=c0, steps=TotalTime)
@@ -66,7 +66,7 @@ for k in range(len(deltas)):
     Chems[:,k] = CA[-1]
 ```
 
-## Figure 7a
+## Figure 4.5a and 4.5b
 
 This plots the steady state plankton density by centering the data around the largest point of the aggregation. 
 
@@ -93,7 +93,7 @@ ax1.yaxis.get_offset_text().set_fontsize(15)
 ax1.set_title(r'Steady State: Plankton Density',fontsize=19)
 
 plt.legend(loc=1)
-plt.savefig('../Final_Figures/Fig7a')
+#plt.savefig('./Figures/Fig4_5a')
 ```
 
 ```{python}
@@ -117,7 +117,7 @@ ax1.yaxis.get_offset_text().set_fontsize(15)
 ax1.set_title(r'Steady State: Chemical',fontsize=19)
 
 plt.legend(loc=1)
-plt.savefig('../Final_Figures/Fig7b')
+#plt.savefig('./Figures/Fig4_5b.png')
 ```
 
 ```{python}

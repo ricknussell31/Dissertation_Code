@@ -1,0 +1,277 @@
+---
+jupyter:
+  jupytext:
+    text_representation:
+      extension: .Rmd
+      format_name: rmarkdown
+      format_version: '1.2'
+      jupytext_version: 1.4.2
+  kernelspec:
+    display_name: Python 3
+    language: python
+    name: python3
+---
+
+```{python}
+from scipy import *
+import numpy as np
+import FlockingMethods_Numba as FMN
+import FlockingMethods_Extra as FM
+from numba import int32, float32, float64, int64, njit, prange
+from numpy.random import rand, uniform
+from numpy import exp
+import matplotlib.pyplot as plt
+```
+
+```{python}
+@njit(parallel=True)
+def Update_Metric(posx,posy,velo,Dists,r,ep,v,N,L,eta,dt):
+    #This method allows us to update the flocking model with the Metric model
+    #Each new velocity is constructed by averaging over all of the velocities within
+    #the radius selected, self.r.
+    #Inputs -- x-coordinates, y-coordinates, trajectories for time = t
+    #Outputs -- x-coordinates, y-coordinates, trajectories for time = t + (delta t)
+
+    Vals = np.zeros((N,N),dtype=int64)
+    TotVals = np.zeros(N,dtype=int64)
+
+    for j in prange(N):
+        #find indicies that are within the radius
+        #Vals = np.zeros((N,N),dtype=int64)
+        #TotVals = np.zeros(N,dtype=int)
+        for i in prange(N):
+            if (Dists[j,i] <= r):
+                Vals[j,TotVals[j]] = i
+                TotVals[j] += 1
+    sint = np.zeros(N,dtype=float32)
+    cost = np.zeros(N,dtype=float32)
+    avgc = np.zeros(N,dtype=float32)
+    avgs = np.zeros(N,dtype=float32)
+
+    for j in prange(N):
+        #find average velocity of those inside the radius
+        for k in prange(TotVals[j]):
+            sint[j] += np.sin(velo[Vals[j,k]])
+            cost[j] += np.cos(velo[Vals[j,k]])
+        avgs[j] = sint[j]/TotVals[j]
+        avgc[j] = cost[j]/TotVals[j]
+
+    #construct the noise
+    noise = uniform(-eta/2,eta/2,N)
+    newvelo = np.zeros(N,dtype=float32)
+    velon = np.zeros(N,dtype=float32)
+    for j in prange(N):
+        newvelo[j] = np.arctan2(avgs[j],avgc[j])
+        velon[j] = np.mod(newvelo[j]+noise[j],2*np.pi)
+        posx[j] += dt*v*np.cos(velon[j])
+        posy[j] += dt*v*np.sin(velon[j]) 
+
+    posx = np.mod(posx,L)
+    posy = np.mod(posy,L)
+
+    return(posx,posy,velon)
+
+@njit(parallel=True)
+def Calc_Dist(posx,posy,L):
+    #find distance of every particle from particle j using periodic boundary conditions
+
+    Dists = np.zeros((len(posx),len(posy)),dtype=float32)
+    Dist0 = np.zeros((len(posx),len(posy)),dtype=float32)
+    Dist1 = np.zeros((len(posx),len(posy)),dtype=float32)
+    Dist2 = np.zeros((len(posx),len(posy)),dtype=float32)
+    Dist3 = np.zeros((len(posx),len(posy)),dtype=float32)
+    Dist4 = np.zeros((len(posx),len(posy)),dtype=float32)
+    Dist5 = np.zeros((len(posx),len(posy)),dtype=float32)
+    Dist6 = np.zeros((len(posx),len(posy)),dtype=float32)
+    Dist7 = np.zeros((len(posx),len(posy)),dtype=float32)
+    Dist8 = np.zeros((len(posx),len(posy)),dtype=float32)
+
+    for j in prange(len(posx)):
+
+        Dist0[:,j] = np.sqrt((posx[j] - posx)**2 + (posy[j] - posy)**2) #regular  
+        Dist1[:,j] = np.sqrt((posx[j]  - L - posx)**2 + (posy[j] - posy + L)**2) #topleft
+        Dist2[:,j] = np.sqrt((posx[j]  - posx)**2 + (posy[j] - posy + L)**2) #topcenter
+        Dist3[:,j] = np.sqrt((posx[j]  + L - posx)**2 + (posy[j] - posy + L)**2) #topright
+        Dist4[:,j] = np.sqrt((posx[j]  - L - posx)**2 + (posy[j] - posy)**2) #middleleft
+        Dist5[:,j] = np.sqrt((posx[j]  + L - posx)**2 + (posy[j] - posy)**2) #middleright
+        Dist6[:,j] = np.sqrt((posx[j]  - L - posx)**2 + (posy[j] - posy - L)**2) #bottomleft
+        Dist7[:,j] = np.sqrt((posx[j]  - posx)**2 + (posy[j] - posy - L)**2) #bottomcenter
+        Dist8[:,j] = np.sqrt((posx[j]  + L - posx)**2 + (posy[j] - posy - L)**2) #bottomright
+
+        for k in prange(len(Dist0)):
+            Dists[j,k] = min(Dist0[k,j],Dist1[k,j],Dist2[k,j],
+                    Dist3[k,j],Dist4[k,j],Dist5[k,j],
+                            Dist6[k,j],Dist7[k,j],Dist8[k,j])
+    return(Dists)
+```
+
+```{python}
+LL = 40 #Length of the perodic domain 
+NN = int(LL**2/2) #Number of particles in the system
+Nois = 0.4 # Noise value eta, which picks a random value from [-eta/2,eta/2]
+R = 3 #Interaction radius
+Time = 6000
+
+SM = FMN.Particles(L=LL,N=NN,eta=Nois,k = 0,r=R,dt=1,v=0.5,time=Time,ep=1) #Set up the system
+PX, PY, V = SM.SetIC() #Initialize the x and y coordinates and the initial velocities
+
+for d in range(1,SM.time):
+    Dists = Calc_Dist(PX[:,d-1],PY[:,d-1],SM.L) #Calculate the distance between each particle
+    #Update Positions and velocities using the Vicsek model
+    PX[:,d],PY[:,d],V[:,d] = Update_Metric(PX[:,d-1],PY[:,d-1],V[:,d-1],
+                                                         Dists,SM.r,SM.ep,SM.v,SM.N,SM.L,SM.eta,SM.dt)
+```
+
+```{python}
+OPVals = np.zeros(Time)
+loops = 100
+for M in range(loops):
+    SM = FMN.Particles(L=LL,N=NN,eta=Nois,k = 0,r=R,dt=1,v=0.5,time=6000,ep=1) #Set up the system
+    posx, posy, velo = SM.SetIC() #Initialize the x and y coordinates and the initial velocities
+
+    for d in range(1,SM.time):
+        Dists = Calc_Dist(posx[:,d-1],posy[:,d-1],SM.L) #Calculate the distance between each particle
+        #Update Positions and velocities using the Vicsek model
+        posx[:,d],posy[:,d],velo[:,d] = Update_Metric(posx[:,d-1],posy[:,d-1],velo[:,d-1],
+                                                             Dists,SM.r,SM.ep,SM.v,SM.N,SM.L,SM.eta,SM.dt)
+    #Calculate Order Parameter at each time step
+    for j in range(SM.time):
+        vax = SM.v*sum(np.cos([velo[:,j]]))
+        vay = SM.v*sum(np.sin([velo[:,j]]))
+        OPVals[j] += (1/(SM.N*SM.v))*np.sqrt(vax**2 + vay**2)
+        
+OPVals = OPVals/loops
+```
+
+## Figure 6.1a
+
+In this figure, we plot an example simulation using $N = 800$, $L = 40$, $\eta = 0.4$, $\Delta t = 1$, and $R = 3$. 
+
+```{python}
+# %matplotlib inline
+
+fig, axs = plt.subplots(nrows=1, ncols=4,figsize=(24,7),tight_layout=True, sharey='row',sharex='col')
+times = [0,10,50,200]
+
+#Plot all times 
+for i in range(len(times)):
+    K = times[i]
+    for j in range(0,len(PX[:,0])):
+        axs[i].arrow(PX[j,K],PY[j,K],np.cos(V[j,K]),np.sin(V[j,K]))
+axs[0].set_ylabel(r'$y$',fontsize=40)
+
+for i in range(0,4):
+    axs[i].set_title('$t = {0}$'.format(times[i]),fontsize=40)
+    axs[i].set_xlabel(r'$x$',fontsize=40)
+    axs[i].text(12,-11,r'$\sigma = {0}$'.format(round(OPVals[times[i]],4)),fontsize=25,color='blue')
+    axs[i].tick_params(labelsize=27)
+    axs[i].locator_params(nbins=3,axis='x')
+    axs[i].locator_params(nbins=3,axis='y')
+    axs[i].set_xlim(0,LL)
+    axs[i].set_ylim(0,LL)
+    axs[i].ticklabel_format(style='plain',axis='x')
+plt.savefig('./Figures/Fig6_1a1.png')
+
+
+fig, axs = plt.subplots(nrows=1, ncols=4,figsize=(24,7),tight_layout=True, sharey='row',sharex='col')
+times = [500,1000,3000,5000]
+
+#Plot all times 
+for i in range(len(times)):
+    K = times[i]
+    for j in range(0,len(PX[:,0])):
+        axs[i].arrow(PX[j,K],PY[j,K],np.cos(V[j,K]),np.sin(V[j,K]))
+axs[0].set_ylabel(r'$y$',fontsize=40)
+
+for i in range(0,4):
+    axs[i].set_title('$t = {0}$'.format(times[i]),fontsize=40)
+    axs[i].set_xlabel(r'$x$',fontsize=40)
+    axs[i].text(12,-11,r'$\sigma = {0}$'.format(round(OPVals[times[i]],4)),fontsize=25,color='blue')
+    axs[i].tick_params(labelsize=27)
+    axs[i].locator_params(nbins=3,axis='x')
+    axs[i].locator_params(nbins=3,axis='y')
+    axs[i].set_xlim(0,LL)
+    axs[i].set_ylim(0,LL)
+    axs[i].ticklabel_format(style='plain',axis='x')
+plt.savefig('./Figures/Fig6_1a2.png')
+```
+
+## Figure 6.1b
+
+We plot the standard order parameter curve for the simulation above. 
+
+```{python}
+scale = 3
+fig, axs = plt.subplots(figsize=(7.4,5), tight_layout = True)
+
+colors = ['#D55E00','#882255','#009E73']
+
+markers = ['o','^','s']
+W = 21
+p = 9
+RI = [2,3,4]
+K = 20
+lins=['-.',':','-']
+alphas = [1,1,1]
+times = np.linspace(0,5999,6000,dtype=int)
+axs.plot(times,OPVals,color=colors[2],linestyle='-',label='$\sigma$',linewidth=3)
+
+axs.set_xlabel(r'Time, $t$',fontsize=15)
+axs.set_ylabel(r'Order Parameter, $\sigma$',fontsize=15)
+axs.tick_params(labelsize=15,which='both',direction='in')
+
+axs.set_xlim(0,5000)
+
+#Make inset axis
+axins = axs.inset_axes([.4,.4,.4,.4])
+axins.plot(times,OPVals,linewidth=2.3,color=colors[2])
+
+axs.set_title('Order Parameter over Time',fontsize=20)
+
+# sub region of the original image
+x1, x2, y1, y2 = 0,200,0,1
+axins.set_xlim(x1, x2)
+axins.set_ylim(y1, y2)
+axins.tick_params(which='both',labelsize=12,direction='in')
+axs.indicate_inset_zoom(axins)
+
+plt.savefig('./Figures/Fig6_1b.png')
+```
+
+## Figure 6.1c
+
+We plot the value of the order parameter at $t = 5000$ for varied values of $\eta$. 
+
+```{python}
+fig,ax = plt.subplots(figsize=(7.4,5))
+colors = ['#648FFF','#785EF0','#DC267F','#FE6100','#FFB000'] #Using IBM Colorblind Scheme 
+lins = ['-','--','-.',':']
+Etas = [0,0.1,0.2,0.3,0.5,1,1.5,2,2.5,3,3.5,4,4.5,5,5.5,6,6.28]
+loops = 100
+OPEnds = np.zeros(len(Etas))
+for i in range(len(Etas)):
+    for M in range(loops):
+        SM = FMN.Particles(L=LL,N=NN,eta=Etas[i],k = 0,r=R,dt=1,v=0.5,time=5000,ep=1) #Set up the system
+        posx, posy, velo = SM.SetIC() #Initialize the x and y coordinates and the initial velocities
+
+        for d in range(1,SM.time):
+            Dists = Calc_Dist(posx[:,d-1],posy[:,d-1],SM.L) #Calculate the distance between each particle
+            #Update Positions and velocities using the Vicsek model
+            posx[:,d],posy[:,d],velo[:,d] = Update_Metric(posx[:,d-1],posy[:,d-1],velo[:,d-1],
+                                                                 Dists,SM.r,SM.ep,SM.v,SM.N,SM.L,SM.eta,SM.dt)
+        #Calculate Order Parameter at each time step
+        vax = SM.v*sum(np.cos([velo[:,-1]]))
+        vay = SM.v*sum(np.sin([velo[:,-1]]))
+        OPEnds[i] += (1/(SM.N*SM.v))*np.sqrt(vax**2 + vay**2)
+
+ax.plot(Etas,OPEnds/loops,'b',markersize=5)
+ax.axhline(0,color='k',linestyle='--')
+
+ax.set_xlabel(r'Noise, $\eta$',fontsize=15)
+ax.set_ylabel('$\sigma$ at $t = 5000$',fontsize=15)
+ax.axhline(0,color='k',linestyle='--')
+ax.set_title('Order Parameter at $t = 5000$',fontsize=20)
+ax.tick_params(labelsize=15)
+ax.set_xlim(-0.1,2*np.pi+0.1)
+plt.savefig('./Figures/Fig6_1c.png')
+```

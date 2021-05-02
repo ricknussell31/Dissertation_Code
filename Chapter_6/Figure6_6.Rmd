@@ -1,0 +1,292 @@
+---
+jupyter:
+  jupytext:
+    text_representation:
+      extension: .Rmd
+      format_name: rmarkdown
+      format_version: '1.2'
+      jupytext_version: 1.4.2
+  kernelspec:
+    display_name: Python 3
+    language: python
+    name: python3
+---
+
+```{python}
+from scipy import *
+import numpy as np
+import FlockingMethods_Numba as FMN
+import FlockingMethods_Extra as FM
+from numba import int32, float32, float64, int64, njit, prange
+from numpy.random import rand, uniform
+from numpy import exp
+import matplotlib.pyplot as plt
+from scipy.signal import savgol_filter
+from scipy.optimize import curve_fit
+from scipy.special import jv
+from scipy.interpolate import interp1d
+```
+
+```{python}
+@njit(parallel=True)
+def Update_Metric(posx,posy,velo,Dists,r,ep,v,N,L,eta,dt):
+    #This method allows us to update the flocking model with the Metric model
+    #Each new velocity is constructed by averaging over all of the velocities within
+    #the radius selected, self.r.
+    #Inputs -- x-coordinates, y-coordinates, trajectories for time = t
+    #Outputs -- x-coordinates, y-coordinates, trajectories for time = t + (delta t)
+
+    Vals = np.zeros((N,N),dtype=int64)
+    TotVals = np.zeros(N,dtype=int64)
+
+    for j in prange(N):
+        #find indicies that are within the radius
+        #Vals = np.zeros((N,N),dtype=int64)
+        #TotVals = np.zeros(N,dtype=int)
+        for i in prange(N):
+            if (Dists[j,i] <= r):
+                Vals[j,TotVals[j]] = i
+                TotVals[j] += 1
+    sint = np.zeros(N,dtype=float32)
+    cost = np.zeros(N,dtype=float32)
+    avgc = np.zeros(N,dtype=float32)
+    avgs = np.zeros(N,dtype=float32)
+
+    for j in prange(N):
+        #find average velocity of those inside the radius
+        for k in prange(TotVals[j]):
+            sint[j] += np.sin(velo[Vals[j,k]])
+            cost[j] += np.cos(velo[Vals[j,k]])
+        avgs[j] = sint[j]/TotVals[j]
+        avgc[j] = cost[j]/TotVals[j]
+
+    #construct the noise
+    noise = uniform(-eta/2,eta/2,N)
+    newvelo = np.zeros(N,dtype=float32)
+    velon = np.zeros(N,dtype=float32)
+    for j in prange(N):
+        newvelo[j] = np.arctan2(avgs[j],avgc[j])
+        velon[j] = np.mod(newvelo[j]+noise[j],2*np.pi)
+        posx[j] += dt*v*np.cos(velon[j])
+        posy[j] += dt*v*np.sin(velon[j]) 
+
+    posx = np.mod(posx,L)
+    posy = np.mod(posy,L)
+
+    return(posx,posy,velon)
+
+@njit(parallel=True)
+def Calc_Dist(posx,posy,L):
+    #find distance of every particle from particle j using periodic boundary conditions
+
+    Dists = np.zeros((len(posx),len(posy)),dtype=float32)
+    Dist0 = np.zeros((len(posx),len(posy)),dtype=float32)
+    Dist1 = np.zeros((len(posx),len(posy)),dtype=float32)
+    Dist2 = np.zeros((len(posx),len(posy)),dtype=float32)
+    Dist3 = np.zeros((len(posx),len(posy)),dtype=float32)
+    Dist4 = np.zeros((len(posx),len(posy)),dtype=float32)
+    Dist5 = np.zeros((len(posx),len(posy)),dtype=float32)
+    Dist6 = np.zeros((len(posx),len(posy)),dtype=float32)
+    Dist7 = np.zeros((len(posx),len(posy)),dtype=float32)
+    Dist8 = np.zeros((len(posx),len(posy)),dtype=float32)
+
+    for j in prange(len(posx)):
+
+        Dist0[:,j] = np.sqrt((posx[j] - posx)**2 + (posy[j] - posy)**2) #regular  
+        Dist1[:,j] = np.sqrt((posx[j]  - L - posx)**2 + (posy[j] - posy + L)**2) #topleft
+        Dist2[:,j] = np.sqrt((posx[j]  - posx)**2 + (posy[j] - posy + L)**2) #topcenter
+        Dist3[:,j] = np.sqrt((posx[j]  + L - posx)**2 + (posy[j] - posy + L)**2) #topright
+        Dist4[:,j] = np.sqrt((posx[j]  - L - posx)**2 + (posy[j] - posy)**2) #middleleft
+        Dist5[:,j] = np.sqrt((posx[j]  + L - posx)**2 + (posy[j] - posy)**2) #middleright
+        Dist6[:,j] = np.sqrt((posx[j]  - L - posx)**2 + (posy[j] - posy - L)**2) #bottomleft
+        Dist7[:,j] = np.sqrt((posx[j]  - posx)**2 + (posy[j] - posy - L)**2) #bottomcenter
+        Dist8[:,j] = np.sqrt((posx[j]  + L - posx)**2 + (posy[j] - posy - L)**2) #bottomright
+
+        for k in prange(len(Dist0)):
+            Dists[j,k] = min(Dist0[k,j],Dist1[k,j],Dist2[k,j],
+                    Dist3[k,j],Dist4[k,j],Dist5[k,j],
+                            Dist6[k,j],Dist7[k,j],Dist8[k,j])
+    return(Dists)
+```
+
+## Fig. 6.6a - Comparison of $\widetilde{G}(\mathbf{k},t)$ with varied $\eta$ for $k = \frac{2\pi}{10}$
+
+```{python}
+LL = 40
+NN = int(LL**2/2)
+R = 3
+Time = 6000
+
+Noises = [0,0.3,1,3.5,4.5,5.5]
+
+t0 = 4000
+tf = 5999
+loops = 300
+k1 = 10
+
+GT = np.zeros((len(Noises),tf-t0,loops))
+
+for i in range(len(Noises)):
+    Nois = Noises[i]
+    for M in range(loops):
+        SM = FMN.Particles(L=LL,N=NN,eta=Nois,k = 0,r=R,dt=1,v=0.5,time=Time,ep=1) #Set up the system
+        posx, posy, velo = SM.SetIC() #Initialize the x and y coordinates and the initial velocities
+
+        for d in range(1,SM.time):
+            Dists = Calc_Dist(posx[:,d-1],posy[:,d-1],SM.L) #Calculate the distance between each particle
+            
+            #Update Positions and velocities using the Vicsek model
+            posx[:,d],posy[:,d],velo[:,d] = Update_Metric(posx[:,d-1],posy[:,d-1],velo[:,d-1],
+                                                                 Dists,SM.r,SM.ep,SM.v,SM.N,SM.L,SM.eta,SM.dt)
+        
+        #Carefully parse the periodic boundary conditions 
+        PBC = np.zeros((NN,SM.time,2))
+        for t in range(1,SM.time):
+            PBC[:,t,:] = PBC[:,t-1,:]
+            Xs = posx[:,t] - posx[:,t-1]
+            Ys = posy[:,t] - posy[:,t-1]
+            PosX = [i for i in range(NN) if Xs[i] < -3]
+            PosY = [i for i in range(NN) if Ys[i] < -3]
+            NegX = [i for i in range(NN) if Xs[i] > 3]
+            NegY = [i for i in range(NN) if Ys[i] > 3]
+            PBC[PosX,t,0] += 1
+            PBC[PosY,t,1] += 1
+            PBC[NegX,t,0] -= 1
+            PBC[NegY,t,1] -= 1
+        
+        #Calculate the RMS at each timestep
+        for t in range(t0,tf):
+            C = (.5/SM.N)*np.sum(np.cos(velo[:,t0:t]))
+            D = (.5/SM.N)*np.sum(np.sin(velo[:,t0:t]))
+            Norm = ((posx[:,t] + PBC[:,t,0]*LL - posx[:,t0] - PBC[:,t0,0]*LL - C)**2 + 
+                    (posy[:,t] + PBC[:,t,1]*LL - posy[:,t0] - PBC[:,t0,1]*LL - D)**2)
+            GT[i,t-t0,M] = (1/SM.N)*np.sum(jv(0,(2*np.pi/k1)*np.sqrt(Norm)))
+```
+
+```{python}
+fig, ax = plt.subplots(figsize=(7,5.4),tight_layout = True)
+
+Noises = [0,0.3,1,3.5,4.5,5.5]
+colors = ['#DC267F','#FE6100','#FFB000','#009E73','#648FFF','#785EF0']
+markers = ['o','s','^','','','']
+
+W3 = 61
+p3 = 4
+K = 160
+lins=['-.',':','-']
+
+for i in range(len(Noises)):
+    A = np.mean(GT[i,:,:],axis=1)
+    AF = savgol_filter(A,W3,p3,mode='nearest')
+    Tim = np.linspace(0,2000,len(A))
+    ax.plot(Tim,A,label='$\eta$ = {0}'.format(Noises[i]),color=colors[i],linewidth=2.4,
+            linestyle=lins[np.mod(i,3)],marker=markers[i],markevery=K,markersize=7)
+    
+#Plot diffusion expectation
+ax.plot(Tim,np.exp(-1/16*(2*np.pi/10)**2*Tim),linestyle = '--',color='k',linewidth=2,label='$\eta = 2 \pi$')
+
+ax.set_xlim(1,1000)
+ax.locator_params(nbins=5,axis='x')
+ax.locator_params(nbins=5,axis='y')
+ax.axhline(0,color='k',alpha=0.5,linestyle='--')
+
+ax.tick_params(labelsize=16)
+ax.legend(loc=1,fontsize=7,prop={'size': 13},handlelength=2.4)
+ax.set_ylabel(r'$\widetilde{G}(t)$ for $k = \frac{2\pi}{10}$',fontsize=20)
+ax.set_xlabel(r'Time, $t$',fontsize=20)
+ax.set_title(r'$\widetilde{G}(t)$ for $k = \frac{2\pi}{10}$ for Varied $\eta$',fontsize=18)
+
+plt.savefig('./Figures/Fig6_6a.png')
+```
+
+## Fig. 6.6b - Time $t_e$ such that $\widetilde{G}(t_e) = e^{-1}$ for varied $\eta$
+
+```{python}
+LL = 40
+NN = int(LL**2/2)
+R = 3
+Time = 6000
+
+Noises = [0.2,0.3,0.5,1,1.5,2,2.5,3,3.1,3.2,3.3,3.4,3.5,3.6,3.7,3.8,3.9,4,4.1,4.2,4.3,4.4,4.5,5,5.5,6,6.28]
+
+t0 = 4000
+tf = 5999
+loops = 300
+
+for i in range(len(Noises)):
+    Nois = Noises[i]
+    for M in range(loops):
+        SM = FMN.Particles(L=LL,N=NN,eta=Nois,k = 0,r=R,dt=1,v=0.5,time=Time,ep=1) #Set up the system
+        posx, posy, velo = SM.SetIC() #Initialize the x and y coordinates and the initial velocities
+
+        for d in range(1,SM.time):
+            Dists = Calc_Dist(posx[:,d-1],posy[:,d-1],SM.L) #Calculate the distance between each particle
+            
+            #Update Positions and velocities using the Vicsek model
+            posx[:,d],posy[:,d],velo[:,d] = Update_Metric(posx[:,d-1],posy[:,d-1],velo[:,d-1],
+                                                                 Dists,SM.r,SM.ep,SM.v,SM.N,SM.L,SM.eta,SM.dt)
+        
+        #Carefully parse the periodic boundary conditions 
+        PBC = np.zeros((NN,SM.time,2))
+        for t in range(1,SM.time):
+            PBC[:,t,:] = PBC[:,t-1,:]
+            Xs = posx[:,t] - posx[:,t-1]
+            Ys = posy[:,t] - posy[:,t-1]
+            PosX = [i for i in range(NN) if Xs[i] < -3]
+            PosY = [i for i in range(NN) if Ys[i] < -3]
+            NegX = [i for i in range(NN) if Xs[i] > 3]
+            NegY = [i for i in range(NN) if Ys[i] > 3]
+            PBC[PosX,t,0] += 1
+            PBC[PosY,t,1] += 1
+            PBC[NegX,t,0] -= 1
+            PBC[NegY,t,1] -= 1
+        
+        #Calculate the RMS at each timestep
+        for t in range(t0,tf):
+            C = (.5/SM.N)*np.sum(np.cos(velo[:,t0:t]))
+            D = (.5/SM.N)*np.sum(np.sin(velo[:,t0:t]))
+            Norm = ((posx[:,t] + PBC[:,t,0]*LL - posx[:,t0] - PBC[:,t0,0]*LL - C)**2 + 
+                    (posy[:,t] + PBC[:,t,1]*LL - posy[:,t0] - PBC[:,t0,1]*LL - D)**2)
+            GT[i,t-t0,M] = (1/SM.N)*np.sum(jv(0,(2*np.pi/k1)*np.sqrt(Norm)))
+```
+
+```{python}
+fig, axs = plt.subplots(figsize=(7,5.4), tight_layout = True)
+
+colors = ['#648FFF','#785EF0','#DC267F','#FE6100','#FFB000'] #Using IBM Colorblind Scheme 
+
+markers = ['o','^','s']
+W = 21
+p = 9
+K = 20
+T = 5000
+
+Vars = np.zeros(len(Noises))
+
+for i in range(len(Noises)):    
+    A = np.mean(np.load('./PaperData/Paper_Data/L40RDF/MobK10_Noise{0}.npy'.format(Noises[i])),axis=1)
+    Tim = np.linspace(0,2000,len(A))
+    ff = interp1d(Tim,A,kind='cubic')
+    K = np.linspace(0,2000,35000)
+    Inter = ff(K)
+    Vars[i] = K[np.where(Inter < 1/np.e)[0][0]]
+
+axs.semilogy(Noises,Vars,color=colors[2],marker='s',linestyle='',label='$t_e$',fillstyle='none',
+               markersize=8)
+
+axs.set_ylabel(r'Value of $t_e$',fontsize=17,labelpad=0,color=colors[2])
+axs.set_title(r'Time such that $\widetilde{G}(\frac{2\pi}{10},t_e) = \frac{1}{e}$',fontsize=20)
+
+
+axs.set_xlabel(r'Noise, $\eta$',fontsize=17)
+
+#Diffusion expectation
+axs.axhline(1/(1/16*(2*np.pi/10)**2),color=colors[2],linestyle = '--',linewidth=1.2,alpha=0.5)
+
+axs.legend(loc=0, prop={"size":19})
+
+axs.tick_params(labelsize=15)
+axs.set_xlim(-0.1,2*np.pi+0.1)
+
+plt.savefig('./Figures/Fig6_6b.png')
+```
