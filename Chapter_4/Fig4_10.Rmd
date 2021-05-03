@@ -339,7 +339,7 @@ for j in range(len(Delts)):
     SumChem = np.mean(TotChem[j,:,:],axis=0)
     Std = np.std(TotChem[j,:,:],axis=0)
     
-    times = np.linspace(0,300,Std)
+    times = np.linspace(0,300,len(Std))
     
     ax.plot(times,SumChem,color=colors[np.mod(j,5)],linestyle = lins[np.mod(j,4)],linewidth=3,
                 label=r'$\delta = 10^{{{0}}}$'.format(-1*Delts[j]))
@@ -376,7 +376,7 @@ for j in range(len(Delts)):
     SumVar = np.mean(TotalGrad[j,:,:],axis=0)
     Std = np.std(TotalGrad[j,:,:],axis=0)
     
-    times = np.linspace(0,300,Std)
+    times = np.linspace(0,300,len(Std))
     
     ax.semilogx(times[M:],SumVar[M:],color=colors[np.mod(j,5)],linestyle = lins[np.mod(j,4)],linewidth=3,
                 label=r'$\delta = 10^{{{0}}}$'.format(-1*Delts[j]))

@@ -1,0 +1,60 @@
+---
+jupyter:
+  jupytext:
+    text_representation:
+      extension: .Rmd
+      format_name: rmarkdown
+      format_version: '1.2'
+      jupytext_version: 1.4.2
+  kernelspec:
+    display_name: Python 3
+    language: python
+    name: python3
+---
+
+```{python}
+from scipy import *
+import numpy as np
+import matplotlib
+matplotlib.use('TkAgg')
+import matplotlib.pyplot as plt
+import profile
+from scipy.stats import uniform, triang
+# #%load_ext Cython
+```
+
+## Fig. 5.1 - Examples of the Various Turning Kernels Used
+
+```{python}
+plt.figure(figsize=(7,5),tight_layout = True)
+colors = ['#648FFF','#785EF0','#DC267F','#FE6100','#FFB000'] #Using IBM Colorblind Scheme 
+markers = ['o','p','s','^','D']
+
+L = .6
+plt.plot(xs,uniform.pdf(xs,loc=np.pi/2-L,scale=2*L)/2 + uniform.pdf(xs,loc=-np.pi/2-L,scale=2*L)/2,
+        color=colors[2],linestyle=':',linewidth=3,alpha=.7,label='$P_1$')
+
+plt.plot(xs,triang.pdf(xs,c=.5, loc=pi/6, scale=2*(np.pi/2-np.pi/6))/2 + 
+         triang.pdf(xs,c=.5, loc=-np.pi+np.pi/6, scale=2*(np.pi/2-np.pi/6))/2,
+        color=colors[1],linestyle='--',linewidth=3,alpha=.7,label='$P_2$')
+
+plt.plot(xs,triang.pdf(xs,c=0, loc=np.pi/4, scale=np.pi-np.pi/4)/2
+         + triang.pdf(xs,c=1, loc=-np.pi, scale=np.pi-np.pi/4)/2,color=colors[3],linestyle='-.',linewidth=3,
+        alpha=.7,label='$P_3$')
+
+plt.plot(xs,IF,color=colors[0],linestyle='-',linewidth=2,alpha=.7,label='$P_4$')
+
+plt.xlim(-np.pi,np.pi)
+plt.xticks([-np.pi,-np.pi/2,0,np.pi/2,np.pi],[r'$-\pi$',r'$-\pi/2$',r'$0$',r'$\pi/2$',r'$\pi$'],fontsize=15)
+plt.xlabel(r'$\zeta = \theta^{\prime} - \theta$',fontsize=19)
+plt.ylabel(r'$P(\zeta)$',fontsize=19)
+plt.title('Examples of Turning Kernels, $P(\zeta)$',fontsize=19)
+plt.yticks(fontsize=15)
+plt.legend(loc=0,fontsize=15)
+
+plt.savefig('./Figures/Fig5_1.png')
+```
+
+```{python}
+
+```

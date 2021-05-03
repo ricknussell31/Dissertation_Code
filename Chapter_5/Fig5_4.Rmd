@@ -55,15 +55,25 @@ def scalarGrad(L,x_periodic,y_periodic,scalar_periodic,xp,dx=1.0e-4):
     return(diffs)
 
 @njit
-def RT(k,delta,L,pos,vel,c,grad_c):
-    # Actually, I need to do this as tumble and run, TR.
+def RTTK(k,delta,L,pos,vel,c,grad_c,Turn,tvv):
     for j in range(len(pos)):
-        Dot = np.dot(vel[j],grad_c[j])
+        Dot = np.dot(vel[j].T,grad_c[j])
         alpha = 1/np.sqrt(delta**2 + Dot**2)
-        if (rand() < k*0.5*(1-alpha*Dot)):
-            th = rand()*2*pi
+        if (rand() < k*0.5*(1- alpha*Dot)):
+            th = np.arctan2(vel[j,1],vel[j,0])
+            
+            if (Turn == 0): #Uniform Dist. [0,2pi]
+                th += rand()*2*np.pi
+                
+            elif (Turn == 1): #Uniform Dist. [a,b]
+                Flip = np.random.choice(np.array([-1,1]))
+                th += Flip*np.random.uniform(tvv[0],tvv[1])
+            elif (Turn == 2 or Turn == 3): #Triangular Dist. 
+                th += choice(np.array([-1,1]))*triangular(tvv[0],tvv[1],tvv[2])
+            elif (Turn == 4):
+                th += choice(np.array([-1,1]))*tvv[0]
+
             vel[j] = np.array([np.cos(th),np.sin(th)])
-    for j in range(len(pos)):
         pos[j] += k*vel[j]
         pos[j] = np.mod(pos[j],L)
     return(pos,vel)
@@ -151,17 +161,17 @@ LL = 10 #Length of domain [0,L] x [0,L]
 dt = 0.01 #Time-stepping size
 TotalTime = 300 #Total non-dimensional time 
 simTime = int(TotalTime/dt) #Number of timesteps in order to achieve total Time 
-loops = 10 #Number of simulations
 
+Turn = 1
+Means = np.linspace(.75,np.pi-.75,15,dtype=float)
 
-MaxChem = np.zeros((3,loops,simTime))
-MinChem = np.zeros((3,loops,simTime))
-TotalGrad = np.zeros((3,loops,simTime))
-TotChem = np.zeros((3,loops,simTime))
+Deps = ['C','A','L']
 
-for j in range(3):
+for m in range(len(Means)):
     
-    for Job in range(loops):
+    tvv = np.array([Means[m]-.75,Means[m]+.75])
+
+    for j in range(3):
 
         if (j == 0):
             SM = PS.Plankton(DP.constantDep,d1=.1,d2=4,N = meshsize,depMaxStr=.01,
@@ -201,11 +211,6 @@ for j in range(3):
         POS = np.zeros((2,numb,2))
         CHEM[1,:,:] = scalar_store[0] #preallocate the chemical 
         POS[1,:,:] = pos_store[0] #preallocate the plankton
-        
-        MaxChem[j,Job,0] = max(CHEM[1].flatten())
-        MinChem[j,Job,0] = min(CHEM[1].flatten())
-        TotalGrad[j,Job,0] = np.sum(np.absolute(np.gradient(CHEM[1],LL/meshsize)))*(LL/meshsize)**2
-        TotChem[j,Job,0] = np.sum(CHEM[1].flatten())*(LL/meshsize)**2
 
         boundaryCutoff = 64*SM.depVar
         intDelta = int((SM.N - 1)*8*np.sqrt(SM.depVar)/SM.L+0.5)
@@ -215,9 +220,8 @@ for j in range(3):
 
         LU = sla.splu(SM.M1.tocsc())
 
-        Times = np.linspace(0,simTime,21,dtype=int)
-
         for k in range(1,simTime):
+
             SM.BuildPeriodic()
             c = scalarInterp(SM.x_periodic,SM.y_periodic,SM.scalar_periodic,pos)
             SM.BuildPeriodic()
@@ -235,110 +239,144 @@ for j in range(3):
             CHEM[1,:,:] = SM.Meshed()
             POS[0,:,:] = POS[1]
             POS[1,:,:] = pos
-            
-            MaxChem[j,Job,k] = max(CHEM[1].flatten())
-            MinChem[j,Job,k] = min(CHEM[1].flatten())
-            TotChem[j,Job,k] = np.sum(CHEM[1].flatten())*(LL/meshsize)**2
-            
-            A, B = np.gradient(CHEM[1],LL/meshsize)
-            TotalGrad[j,Job,k] = np.sum(np.sqrt(A**2 + B**2))*(LL/meshsize)**2
+
+        np.save('./Data/Pos_Dep{0}_UnifTK_M{1}.npy'.format(Deps[j],m),pos)
 ```
 
-## Fig. 4.8a - Total Chemical in the system over time
-
 ```{python}
-fig, ax = plt.subplots(figsize=(7,5),tight_layout=True)
-
-colors = ['#000000','#009E73','#D55E00'] 
-lins = ['--','-',':']
-
-Deps = ['C','A','L']
-for j in range(len(Deps)):
+def planktonProjection(pos,meshsize):
     
-    SumChem = np.mean(TotChem[j,:,:],axis=0)
-    Std = np.std(TotChem[j,:,:],axis=0)
-    
-    
-    times = np.linspace(0,300,len(Std))
-    
-    ax.fill_between(times,SumChem-Std,SumChem-Std,color=colors[j],alpha=.3)
-    
-    ax.plot(times,SumChem,color=colors[j],linestyle = lins[j],linewidth=2.8,label=r'$f_{0}(c)$'.format(j+1))
+    x = r_[0:Swimmers.L:1j*meshsize] # setup the spatial mesh. It is a long row vector
+    # Create some local coordinates for the square domain.
+    y = 1*x
+    xm,ym = np.meshgrid(x,y)
+    f = np.zeros((meshsize,meshsize))
+    Std = Swimmers.depVar
 
-ax.set_xlabel(r'Time, $t$',fontsize=20)
-ax.set_ylabel(r'$C(t)$',fontsize=20)
-ax.set_title('Total Chemical',fontsize=20)
-
-ax.tick_params(labelsize=18)
-
-ax.set_xlim(0,300)
-ax.legend(fontsize=16)
-
-plt.savefig('./Figures/Fig4_8a.png')
+    boundaryCutoff = 64*Std
+    
+    intDelta = int((meshsize)*8*np.sqrt(Std)/Swimmers.L + 0.5)
+    
+    for i in range(0,Swimmers.num):
+        A, B, C, D = 0,0,0,0
+        p = pos[i,:]
+        
+        centerX = int((meshsize-1)*p[0]/Swimmers.L+0.5)
+        centerY = int((meshsize-1)*p[1]/Swimmers.L+0.5)
+        
+        lowerX      = max(0,centerX-intDelta)
+        lowerXplus  = max(0,centerX-intDelta + (meshsize-1))
+        lowerXminus = max(0,centerX-intDelta - (meshsize-1))
+        upperX      = min(meshsize,centerX+intDelta)
+        upperXplus  = min(meshsize,centerX+intDelta + (meshsize-1))
+        upperXminus = min(meshsize,centerX+intDelta - (meshsize-1))
+        lowerY      = max(0,centerY-intDelta)
+        lowerYplus  = max(0,centerY-intDelta + (meshsize-1))
+        lowerYminus = max(0,centerY-intDelta - (meshsize-1))
+        upperY      = min(meshsize,centerY+intDelta)
+        upperYplus  = min(meshsize,centerY+intDelta + (meshsize-1))
+        upperYminus = min(meshsize,centerY+intDelta - (meshsize-1))
+        
+        sliceX = slice(lowerX,upperX+1)
+        sliceY = slice(lowerY,upperY+1)
+        
+        f[sliceY,sliceX] = f[sliceY,sliceX] + (1/(4*pi*Std))*np.exp(-((xm[sliceY,sliceX]-p[0])**2+(ym[sliceY,sliceX]-p[1])**2)/4/Std)
+        if ((p[0])**2<boundaryCutoff):
+            sliceX = slice(lowerXplus,upperXplus+1)
+            sliceY = slice(lowerY,upperY+1)
+            f[sliceY,sliceX] = f[sliceY,sliceX] + (1/(4*pi*Std))*np.exp(-((xm[sliceY,sliceX]-p[0]-Swimmers.L)**2+(ym[sliceY,sliceX]-p[1])**2)/4/Std)
+            A = 1
+        if ((p[0]-Swimmers.L)**2<boundaryCutoff):
+            sliceX = slice(lowerXminus,upperXminus+1)
+            sliceY = slice(lowerY,upperY+1)
+            f[sliceY,sliceX] = f[sliceY,sliceX] + (1/(4*pi*Std))*np.exp(-((xm[sliceY,sliceX]-p[0]+Swimmers.L)**2+(ym[sliceY,sliceX]-p[1])**2)/4/Std)
+            B = 1
+        if ((p[1])**2<boundaryCutoff):
+            sliceX = slice(lowerX,upperX+1)
+            sliceY = slice(lowerYplus,upperYplus+1)
+            f[sliceY,sliceX] = f[sliceY,sliceX] + (1/(4*pi*Std))*np.exp(-((xm[sliceY,sliceX]-p[0])**2+(ym[sliceY,sliceX]-p[1]-Swimmers.L)**2)/4/Std)
+            C = 1
+        if ((p[1]-Swimmers.L)**2<boundaryCutoff):
+            sliceX = slice(lowerX,upperX+1)
+            sliceY = slice(lowerYminus,upperYminus+1)
+            f[sliceY,sliceX] = f[sliceY,sliceX] + (1/(4*pi*Std))*np.exp(-((xm[sliceY,sliceX]-p[0])**2+(ym[sliceY,sliceX]-p[1]+Swimmers.L)**2)/4/Std)
+            D = 1
+        if (A == 1 and C == 1): #Plankton in Lower Left Corner
+            sliceX = slice(lowerXplus,upperXplus+1)
+            sliceY = slice(lowerYplus,upperYplus+1)
+            f[sliceY,sliceX] = f[sliceY,sliceX] + (1/(4*pi*Std))*np.exp(-((xm[sliceY,sliceX]-p[0]-Swimmers.L)**2+(ym[sliceY,sliceX]-p[1]-Swimmers.L)**2)/4/Std)
+        if (A == 1 and D == 1): #Plankton in Lower Left Corner
+            sliceX = slice(lowerXplus,upperXplus+1)
+            sliceY = slice(lowerYminus,upperYminus+1)
+            f[sliceY,sliceX] = f[sliceY,sliceX] + (1/(4*pi*Std))*np.exp(-((xm[sliceY,sliceX]-p[0]-Swimmers.L)**2+(ym[sliceY,sliceX]-p[1]+Swimmers.L)**2)/4/Std)
+        if (B == 1 and C == 1): #Plankton in Upper Right Corner
+            sliceX = slice(lowerXminus,upperXminus+1)
+            sliceY = slice(lowerYplus,upperYplus+1)
+            f[sliceY,sliceX] = f[sliceY,sliceX] + (1/(4*pi*Std))*np.exp(-((xm[sliceY,sliceX]-p[0]+Swimmers.L)**2+(ym[sliceY,sliceX]-p[1]-Swimmers.L)**2)/4/Std)
+        if (B == 1 and D == 1): #Plankton in Lower Right Corner
+            sliceX = slice(lowerXminus,upperXminus+1)
+            sliceY = slice(lowerYminus,upperYminus+1)
+            f[sliceY,sliceX] = f[sliceY,sliceX] + (1/(4*pi*Std))*np.exp(-((xm[sliceY,sliceX]-p[0]+Swimmers.L)**2+(ym[sliceY,sliceX]-p[1]+Swimmers.L)**2)/4/Std)
+    return xm,ym,f*(Swimmers.L**2/Swimmers.num)
 ```
 
-## Fig. 4.8b - Chemical height in the system over time, $\max(c(t)) - \min(c(t))$
+## Fig 5.4 - Plankton density at $t = 300$ for varied turning kernel means and deposition functions
 
 ```{python}
-fig, ax = plt.subplots(figsize=(7,5),tight_layout=True)
+fig, axs = plt.subplots(figsize = (40,24),nrows = 3, ncols = 5, sharey = 'row', sharex = 'row')
+
+fig.subplots_adjust(right=1)
+fig.subplots_adjust(hspace=0.13, wspace=0.13)
 
 colors = ['#000000','#009E73','#D55E00'] 
-lins = ['--','-',':']
+linestyles = ['-','-.',':']
+params = {'legend.fontsize': 15,'legend.framealpha':1}
 
+plt.rcParams.update(params)
+cmaps = ['Greys','Greens','Oranges']
+Low = .5
+Highs = [2.5,1.5,2.5]
 Deps = ['C','A','L']
-for j in range(len(Deps)):
+Means2 = [5,7,9,11,13]
+
+for i in range(len(Means)):
     
-    SumMM = np.mean(MaxChem[j,:,:]-MinChem[j,:,:],axis=0)
-    Std = np.std(MaxChem[j,:,:]-MinChem[j,:,:],axis=0)
+    for j in range(len(Deps)):
+        axs[j,0].set_ylabel(r'$f(c) = f_{0}(c)$'.format(j+1),fontsize=40,rotation=90)
+        hts = np.save('./Data/Pos_Dep{0}_UnifTK_M{1}.npy'.format(Deps[j],Means2[i]),pos)
+        xm, ym, ContoursSlice = particleProjectionFaster(hts,400)
+        cs = axs[j,i].pcolormesh(xm,ym,ContoursSlice,cmap=cmaps[j])
+        cs.set_clim(Low,Highs[j])
+        axs[j,i].tick_params(which='both',labelsize=25,direction='in')
+        axs[j,i].locator_params(nbins=3,axis='x')
+        axs[j,i].locator_params(nbins=3,axis='y')
+        axs[j,i].set_xlim(0,10)
+        axs[j,i].set_ylim(0,10)
+        axs[j,0].yaxis.set_label_coords(-0.2,.42)
+        
+        if (i == 4):
+            if (j == 0 or j == 2):
+                cbar = fig.colorbar(cs,ticks = [.5,1,1.5,2,2.5],
+                        ax=axs[j].ravel().tolist(),location='right',pad=0.01,shrink=0.8,alpha=.3)
+                cbar.set_ticks([.5,1,1.5,2,2.5])
+                cbar.update_ticks()
+                cbar.ax.tick_params(labelsize=25)
+                cbar.ax.set_yticklabels([r'$\overline{\rho}/2$',r'$\overline{\rho}$',
+                                         r'$3\overline{\rho}/2$',r'$2\overline{\rho}$',r'$5\overline{\rho}/2$'])
+            if (j == 1):
+                cbar = fig.colorbar(cs,ticks = [.5,1,1.5],
+                        ax=axs[j].ravel().tolist(),location='right',pad=0.01,shrink=0.8,alpha=.3)
+                cbar.set_ticks([.5,1,1.5])
+                cbar.update_ticks()
+                cbar.ax.tick_params(labelsize=25)
+                cbar.ax.set_yticklabels([r'$\overline{\rho}/2$',r'$\overline{\rho}$',
+                                         r'$3\overline{\rho}/2$'])
+
+            cbar.set_label(r'Plankton, $\rho$',size=30)
+
     
-    times = np.linspace(0,300,len(Std))
-    
-    ax.fill_between(times,SumMM-Std,SumMM-Std,color=colors[j],alpha=.3)
-    
-    ax.plot(times,SumMM,color=colors[j],linestyle = lins[j],linewidth=2.8,label=r'$f_{0}(c)$'.format(j+1))
+    axs[0,i].set_title(r'$\mu = {0}$'.format(round(Means[Means2[i]],3)),fontsize=40,pad=1)
+    axs[2,i].set_xlabel(r'$x$'.format(Times[i]),fontsize=40)
 
-ax.set_xlabel(r'Time, $t$',fontsize=20)
-ax.set_ylabel(r'$\max(c(t)) - \min(c(t))$',fontsize=20)
-
-ax.set_title('Chemical Height',fontsize=20)
-ax.tick_params(labelsize=18)
-
-
-ax.ticklabel_format(style='sci',axis='y',scilimits=(-2,-2),useMathText=True)
-ax.yaxis.get_offset_text().set_fontsize(18)
-
-ax.set_xlim(0,300)
-ax.legend(fontsize=16)
-
-plt.savefig('./Figures/Fig4_8b.png')
-```
-
-## Fig. 4.8c - Total Variation over time, $\int_{D} |\nabla c(\mathbf{x},t) | \, d\mathbf{x}$
-
-```{python}
-fig, ax = plt.subplots(figsize=(7,5),tight_layout=True)
-
-colors = ['#000000','#009E73','#D55E00'] 
-lins = ['--','-',':']
-
-Deps = ['C','A','L']
-for j in range(len(Deps)):
-    
-    SumVar = np.mean(TotalGrad[j,:,:],axis=0)
-    Std = np.std(TotalGrad[j,:,:],axis=0)
-    
-    times = np.linspace(0,300,len(Std))
-    
-    ax.fill_between(times,SumVar-Std,SumVar-Std,color=colors[j],alpha=.3)
-    
-    ax.plot(times,SumVar,color=colors[j],linestyle = lins[j],linewidth=2.8,label=r'$f_{0}(c)$'.format(j+1))
-
-ax.set_xlabel(r'Time, $t$',fontsize=20)
-ax.set_ylabel(r'$V(t)$',fontsize=20)
-ax.set_title('Total Variation',fontsize=20)
-ax.tick_params(labelsize=18)
-ax.set_xlim(0,300)
-ax.legend(fontsize=16)
-
-plt.savefig('./Figures/Fig4_8c.png')
+plt.savefig('./Figures/Fig4_7.png')
 ```

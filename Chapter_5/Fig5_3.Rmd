@@ -1,0 +1,195 @@
+---
+jupyter:
+  jupytext:
+    text_representation:
+      extension: .Rmd
+      format_name: rmarkdown
+      format_version: '1.2'
+      jupytext_version: 1.4.2
+  kernelspec:
+    display_name: Python 3
+    language: python
+    name: python3
+---
+
+```{python}
+from scipy import *
+import numpy as np
+import matplotlib
+matplotlib.use('TkAgg')
+import matplotlib.pyplot as plt
+import PlanktonSignaling.Deposition as DP
+import profile
+from scipy.sparse import diags, hstack, vstack, bsr_matrix, linalg
+# %matplotlib notebook
+from scipy.special import iv
+
+# #%load_ext Cython
+```
+
+```{python}
+def MatrixBuildTK(k1,k2,s,FC):
+    #FC are the complex fourier coefficients of the turning kernel
+    #Should be of size 2*s + 1
+    kappa = k1 + 1j*k2
+    kappab = k1 - 1j*k2
+    Z = np.zeros((2*s+1,1),dtype=complex)
+    SupD = -1*np.ones(2*s,dtype=complex)*(1j/2)*(kappa)
+    SubD = -1*np.ones(2*s,dtype=complex)*(1j/2)*(kappab)
+    MD = np.pi*np.flip(FC) + -1/2
+    N = diags([MD,SupD,SubD],[0,1,-1])
+    Z[s-1]=-1*psib*kappa*1j/(2*delta)*(np.pi*FC[s+1]-1/2)
+    Z[s+1]=-1*psib*kappab*1j/(2*delta)*(np.pi*FC[s-1]-1/2)
+    F = hstack([bsr_matrix(Z),N])
+    M = np.zeros((1,2*s+2),dtype=complex)
+    M[0,0] = d3 - d1*(k1**2 + k2**2)
+    M[0,s+1] = 2*pi*f0
+    return(vstack([bsr_matrix(M),F]))
+```
+
+```{python}
+def TriGen(modes,a,c,b):
+    #Triangular distribution of (a, c) with mean b.
+    FC = np.ones(2*modes + 1)
+    Waves = np.linspace(-modes,modes, 2*modes + 1)
+    for j in range(len(Waves)):
+        n = Waves[j]
+        if (n != 0):
+            H = 1/(np.pi*(a-b)*(a-c)*(b-c)*n**2)
+            FC[j] = H*((c-b)*np.cos(a*n) + (a-c)*np.cos(b*n) + (b-a)*np.cos(c*n))
+    FC[modes] = 1/(2*np.pi)
+    return(FC)
+
+#Von Mises distribution
+def VonMis(modes,kap,mu):
+    Waves = np.linspace(-modes,modes, 2*modes + 1,dtype = int)
+    FC = (1/(2*pi*iv(0,kap)))*np.cos(Waves*mu)*iv(abs(Waves),kap)
+    return(FC)
+
+#Uniform distribution
+def Unifab(modes,m,a):
+    FC = np.ones(2*modes + 1)
+    Waves = np.linspace(-modes,modes, 2*modes + 1,dtype = int)
+    for j in range(len(Waves)):
+        n = Waves[j]
+        if (n != 0):
+            H = 1/(2*np.pi*a*n)
+            FC[j] = H*(np.cos(n*m)*np.sin(n*a))
+    FC[modes] = 1/(2*np.pi)
+    return(FC)
+```
+
+## Fig. 5.3a - Plot of $R_N(|\mathbf{k}|)$ with varied turning kernels with equal one-sided mean and variance
+
+```{python}
+plt.figure(figsize=(7.5,5.2),tight_layout = True)
+colors = ['#DC267F','#785EF0','#FE6100','#648FFF'] #Using IBM Colorblind Scheme 
+markers = ['o','p','s','^','D','o']
+delta = 0.001
+d1 = .3
+K = 10
+d2 = 2
+c0 = 0.01
+modes = 100
+for i in [0,1,2,3]: 
+    if (i == 0):
+        a = .75
+        Mean = np.pi/2
+        FC = Unifab(modes,Mean,a)
+        
+    if (i == 1):
+        Mean = np.pi/2
+        FC = TriGen(modes,Mean-.75*np.sqrt(2),Mean,Mean + .75*np.sqrt(2))
+        
+    if (i == 2):
+        FC = TriGen(modes,.874,1.047,2.791)
+        
+    if (i == 3):
+        kap = 5.84
+        Mean = np.pi/2
+        FC = VonMis(modes,kap,Mean)
+
+    f0 = DP.constantDep(c0,0.01,0.05,.03)
+    f1 = DP.constantDep(c0+0.0001,0.01,0.05,.03)
+    f2 = DP.constantDep(c0-0.0001,0.01,0.05,.03)          
+    p = d2*c0/f0
+    psib = p/(2*pi)
+    fp = (f1 - f2)/(2*0.0001)
+    d3 = p*fp - d2
+
+    eigs = []
+    k11 = np.linspace(0,5,80)
+    for j in k11:
+        try:
+            eigs=np.append(eigs,linalg.eigs(MatrixBuildTK2(j,j,modes,FC),which='LR',k=1)[0][0])
+        except:
+            eigs = np.append(eigs,max(np.real(linalg.eigs(MatrixBuildTK2(j,j,modes,FC),k=int(modes/5))[0])))
+    plt.plot(np.sqrt(2)*k11,eigs,label=r'$P_{0}$'.format(i+1), 
+            color=colors[i],marker=markers[i],markevery=K,linewidth=2.4,alpha=.7)
+
+plt.plot(np.sqrt(2)*k11[0:len(eigs)],eigs*0,'k',linestyle='-',linewidth=2)
+plt.plot(np.sqrt(2)*k11[0:len(eigs)],eigs*0-1/2,'k',linestyle='--',linewidth=2)
+
+plt.xlabel(r'Magnitude of Wave Number, $|\mathbf{k}|$',fontsize=15)
+plt.ylabel(r'$R_N(|\mathbf{k}|)$',fontsize=15,labelpad=-3)
+plt.title(r'Max Real Part of Eigs.: Same Mean and Variance', 
+          fontsize=15)
+plt.legend(fontsize=13,loc=0)
+plt.xlim(0,np.sqrt(2)*k11[-1])
+plt.tick_params(labelsize=18)
+
+plt.savefig('./Figures/Fig5_3a.png')
+```
+
+## Fig. 5.3b - Complex fourier coefficients for the plots with similar equal one-sided mean and variance
+
+```{python}
+fig, ax = plt.subplots(figsize=(7.5,5.2),tight_layout = True)
+colors = ['#DC267F','#785EF0','#FE6100','#648FFF'] #Using IBM Colorblind Scheme 
+markers = ['o','p','s','^','D','o']
+
+delta = 0.001
+d1 = .3
+d2 = 2
+c0 = 0.01
+
+modes = 10
+
+for i in [0,1,2,3]: 
+    
+    if (i == 0):
+        a = .75
+        Mean = np.pi/2
+        FC = Unifab(modes,Mean,a)
+        
+    if (i == 1):
+        Mean = np.pi/2
+        FC = TriGen(modes,Mean-.75*np.sqrt(2),Mean,Mean + .75*np.sqrt(2))
+        
+    if (i == 2):
+        FC = TriGen(modes,.874,1.047,2.791)
+        
+    if (i == 3):
+        kap = 5.84
+        Mean = np.pi/2
+        FC = VonMis(modes,kap,Mean)
+        
+    Waves = np.linspace(-modes,modes, 2*modes + 1)
+    ax.plot(Waves,FC,label=r'$P_{0}$'.format(i+1), 
+            color=colors[i],marker=markers[i],linestyle='',alpha=.7)
+
+ax.set_xlabel(r'Value of $n$',fontsize=15)
+ax.set_ylabel(r'$p_n$',fontsize=15,labelpad=-3)
+ax.set_title(r'Complex Fourier Coefficients for Varied $P_i$', 
+          fontsize=15)
+ax.legend(fontsize=13,loc=0)
+ax.set_xlim(-.2,modes+.2)
+plt.ylim(-.17,.17)
+ax.tick_params(labelsize=18)
+ax.locator_params(nbins = 11, axis='x')
+ax.set_yticks([1/(2*np.pi),0,-1/(2*np.pi)])
+ax.set_yticklabels([r'$\frac{1}{2\pi}$','0',r'$-\frac{1}{2\pi}$'])
+ax.axhline(0,color='k',alpha = .3)
+
+plt.savefig('./Figures/Fig5_3b.png')
+```

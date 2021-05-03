@@ -1,0 +1,802 @@
+---
+jupyter:
+  jupytext:
+    text_representation:
+      extension: .Rmd
+      format_name: rmarkdown
+      format_version: '1.2'
+      jupytext_version: 1.4.2
+  kernelspec:
+    display_name: Python 3
+    language: python
+    name: python3
+---
+
+```{python}
+from scipy import *
+import numpy as np
+import matplotlib.pyplot as plt
+import PlanktonSignaling.basics as PS
+import PlanktonSignaling.Deposition as DP
+
+import scipy.sparse as sp
+from scipy.interpolate import RectBivariateSpline,griddata
+from scipy.sparse.linalg import spsolve
+from scipy.linalg import solve
+from scipy.sparse import linalg as sla
+from scipy import sparse
+from numba import int32, float32, float64, int64, njit, prange
+from numpy import exp
+from numba import prange
+
+# %matplotlib notebook
+```
+
+```{python}
+def initial_conditions(x,y):
+    return(0*x + 0.01)
+
+def scalarInterp(x_periodic,y_periodic,scalar_periodic,pos):
+    bspline = RectBivariateSpline(x_periodic,y_periodic,scalar_periodic)
+    return(bspline.ev(pos[:,1],pos[:,0]))
+
+
+
+def scalarGrad(L,x_periodic,y_periodic,scalar_periodic,xp,dx=1.0e-4):
+    dx = dx*L
+    bspline = RectBivariateSpline(x_periodic,y_periodic,scalar_periodic)
+    p = np.array([np.mod(xp + np.array([dx,0]),L),np.mod(xp - np.array([dx,0]),L),np.mod(xp + np.array([0,dx]),L),
+                                  np.mod(xp - np.array([0,dx]),L)])
+
+    dp = bspline.ev(p[:,:,1],p[:,:,0])
+
+    diffs = np.array([dp[0]-dp[1],dp[2]-dp[3]])/2/dx
+    diffs = diffs.T
+    return(diffs)
+
+@njit
+def RTTK(k,delta,L,pos,vel,c,grad_c,Turn,tvv):
+    for j in range(len(pos)):
+        Dot = np.dot(vel[j].T,grad_c[j])
+        alpha = 1/np.sqrt(delta**2 + Dot**2)
+        if (rand() < k*0.5*(1- alpha*Dot)):
+            th = np.arctan2(vel[j,1],vel[j,0])
+            
+            if (Turn == 0): #Uniform Dist. [0,2pi]
+                th += rand()*2*np.pi
+                
+            elif (Turn == 1): #Uniform Dist. [a,b]
+                Flip = np.random.choice(np.array([-1,1]))
+                th += Flip*np.random.uniform(tvv[0],tvv[1])
+                
+            elif (Turn == 2 or Turn == 3): #Triangular Dist. 
+                th += choice(np.array([-1,1]))*triangular(tvv[0],tvv[1],tvv[2])
+                
+            elif (Turn == 4):
+                th += choice(np.array([-1,1]))*tvv[0]
+
+            vel[j] = np.array([np.cos(th),np.sin(th)])
+        pos[j] += k*vel[j]
+        pos[j] = np.mod(pos[j],L)
+        
+    return(pos,vel)
+
+
+@njit(parallel=True) 
+def Update(N,L,k,Std,num,depStr,pos,xm,ym,intDelta,meshsize,boundaryCutoff):    
+    
+    f = np.zeros((N,N),dtype=float32)
+    #f = np.zeros((N,N))
+    for i in prange(num):
+        Str = depStr[i]
+        p = pos[i]
+        A, B, C, D = 0,0,0,0
+        centerX = int((meshsize-1)*p[0]/L+0.5)
+        centerY = int((meshsize-1)*p[1]/L+0.5)
+        lowerX      = max(0,centerX-intDelta)
+        lowerXplus  = max(0,centerX-intDelta + (meshsize-1))
+        lowerXminus = max(0,centerX-intDelta - (meshsize-1))
+        upperX      = min(meshsize,centerX+intDelta)
+        upperXplus  = min(meshsize,centerX+intDelta + (meshsize-1))
+        upperXminus = min(meshsize,centerX+intDelta - (meshsize-1))
+        lowerY      = max(0,centerY-intDelta)
+        lowerYplus  = max(0,centerY-intDelta + (meshsize-1))
+        lowerYminus = max(0,centerY-intDelta - (meshsize-1))
+        upperY      = min(meshsize,centerY+intDelta)
+        upperYplus  = min(meshsize,centerY+intDelta + (meshsize-1))
+        upperYminus = min(meshsize,centerY+intDelta - (meshsize-1))
+        sliceX = slice(lowerX,upperX+1)
+        sliceY = slice(lowerY,upperY+1)
+        f[sliceY,sliceX] += Str*(1/(4*pi*Std))*exp(-((xm[sliceY,sliceX]-p[0])**2
+                               +(ym[sliceY,sliceX]-p[1])**2)/4/Std)
+        if ((p[0])**2<boundaryCutoff):
+            sliceX = slice(lowerXplus,upperXplus+1)
+            sliceY = slice(lowerY,upperY+1)
+            f[sliceY,sliceX] += Str*(1/(4*pi*Std))*exp(-((xm[sliceY,sliceX]-p[0]-L)**2
+                                           +(ym[sliceY,sliceX]-p[1])**2)/4/Std)
+            A = 1
+        if ((p[0]-L)**2<boundaryCutoff):
+            sliceX = slice(lowerXminus,upperXminus+1)
+            sliceY = slice(lowerY,upperY+1)
+            f[sliceY,sliceX] += Str*(1/(4*pi*Std))*exp(-((xm[sliceY,sliceX]-p[0]+L)**2
+                                       +(ym[sliceY,sliceX]-p[1])**2)/4/Std)
+            B = 1
+        if ((p[1])**2<boundaryCutoff):
+            sliceX = slice(lowerX,upperX+1)
+            sliceY = slice(lowerYplus,upperYplus+1)
+            f[sliceY,sliceX] += Str*(1/(4*pi*Std))*exp(-((xm[sliceY,sliceX]-p[0])**2
+                                    +(ym[sliceY,sliceX]-p[1]-L)**2)/4/Std)
+            C = 1
+        if ((p[1]-L)**2<boundaryCutoff):
+            sliceX = slice(lowerX,upperX+1)
+            sliceY = slice(lowerYminus,upperYminus+1)
+            f[sliceY,sliceX] += Str*(1/(4*pi*Std))*exp(-((xm[sliceY,sliceX]-p[0])**2
+                                +(ym[sliceY,sliceX]-p[1]+L)**2)/4/Std)
+            D = 1
+        if (A == 1 and C == 1): #Plankton in Lower Left Corner
+            sliceX = slice(lowerXplus,upperXplus+1)
+            sliceY = slice(lowerYplus,upperYplus+1)
+            f[sliceY,sliceX] += Str*(1/(4*pi*Std))*exp(-((xm[sliceY,sliceX]-p[0]-L)**2
+                                 +(ym[sliceY,sliceX]-p[1]-L)**2)/4/Std)
+        if (A == 1 and D == 1): #Plankton in Lower Left Corner
+            sliceX = slice(lowerXplus,upperXplus+1)
+            sliceY = slice(lowerYminus,upperYminus+1)
+            f[sliceY,sliceX] += Str*(1/(4*pi*Std))*exp(-((xm[sliceY,sliceX]-p[0]-L)**2
+                                   +(ym[sliceY,sliceX]-p[1]+L)**2)/4/Std)
+        elif (B == 1 and C == 1): #Plankton in Upper Right Corner
+            sliceX = slice(lowerXminus,upperXminus+1)
+            sliceY = slice(lowerYplus,upperYplus+1)
+            f[sliceY,sliceX] += Str*(1/(4*pi*Std))*exp(-((xm[sliceY,sliceX]-p[0]+L)**2
+                                    +(ym[sliceY,sliceX]-p[1]-L)**2)/4/Std)
+        elif (B == 1 and D == 1): #Plankton in Lower Right Corner
+            sliceX = slice(lowerXminus,upperXminus+1)
+            sliceY = slice(lowerYminus,upperYminus+1)
+            f[sliceY,sliceX] += Str*(1/(4*pi*Std))*exp(-((xm[sliceY,sliceX]-p[0]+L)**2
+                                    +(ym[sliceY,sliceX]-p[1]+L)**2)/4/Std)
+
+    f = f.reshape((N**2,))
+    return(f)
+```
+
+```{python}
+meshsize = 400  #Chemical Mesh size
+numb = 160000  #Number of plankton in simulation
+LL = 10 #Length of domain [0,L] x [0,L]
+dt = 0.01 #Time-stepping size
+TotalTime = 300 #Total non-dimensional time 
+simTime = int(TotalTime/dt) #Number of timesteps in order to achieve total Time 
+loops = 10 #Number of simulations
+
+Turn = 1
+Means = np.linspace(.75,np.pi-.75,15,dtype=float)
+
+TotalGradC = np.zeros((len(Means),loops,simTime))
+TotChemC = np.zeros((len(Means),loops,simTime))
+
+j = 0 #Constant Deposition Function
+
+for m in range(len(Means)):
+    
+    tvv = np.array([Means[m]-.75,Means[m]+.75])
+
+    for Job in range(loops):
+
+        if (j == 0):
+            SM = PS.Plankton(DP.constantDep,d1=.1,d2=4,N = meshsize,depMaxStr=.01,
+                        Const=3,L=LL,k=dt,delta=1e-3,depThreshold=0.012, 
+                    depTransWidth=0.008, num = numb, c0=0.01)
+        if (j == 1):
+            SM = PS.Plankton(DP.atanDep,d1=.1,d2=4,N = meshsize,depMaxStr=.01,
+                       Const=3,L=LL,k=dt,delta=1e-3,depThreshold=0.012, 
+                      depTransWidth=0.0007, num = numb, c0=0.01)
+
+        if (j == 2):
+            SM = PS.Plankton(DP.linAtanDep,d1=.1,d2=4,N = meshsize,depMaxStr=.01,
+                       Const=3,L=LL,k=dt,delta=1e-3,depThreshold=0.012, 
+                       depTransWidth=0.008, num = numb, c0=0.01)
+
+        SM.SetIC(initial_conditions)
+
+        lenn = int(np.sqrt(numb))
+        pos = np.zeros((1,2))
+        vel = np.zeros((1,2))
+
+        #Place plankton down uniformly throughout the domain and give each a direction to travel initially
+        for l in range(0,lenn):
+            for k in range(0,lenn):
+                pos = np.append(pos,[np.array([np.mod(k*(SM.L*1/(lenn)) + 0.5*(SM.L*1/(lenn)),SM.L),
+                        np.mod(l*(SM.L*1/(lenn)) + 0.5*(SM.L*1/(lenn)),SM.L)])],axis=0)
+                th  = rand()*2*pi
+                vel = np.append(vel,[np.array([np.cos(th),np.sin(th)])],axis=0)
+
+        pos = np.delete(pos,0,0)
+        vel = np.delete(vel,0,0)
+        pos_store = list([pos[:,:]])
+        pos_store = list([np.array(pos)])
+        scalar_store = list([SM.Meshed()])
+
+        CHEM = np.zeros((2,meshsize,meshsize))
+        POS = np.zeros((2,numb,2))
+        CHEM[1,:,:] = scalar_store[0] #preallocate the chemical 
+        POS[1,:,:] = pos_store[0] #preallocate the plankton
+        
+        TotalGradC[m,Job,0] = np.sum(np.absolute(np.gradient(CHEM[1],LL/meshsize)))*(LL/meshsize)**2
+        TotChemC[m,Job,0] = np.sum(CHEM[1].flatten())*(LL/meshsize)**2
+
+        boundaryCutoff = 64*SM.depVar
+        intDelta = int((SM.N - 1)*8*np.sqrt(SM.depVar)/SM.L+0.5)
+        Std = SM.depVar
+        meshsize = SM.N
+        PlankDensity = SM.density*SM.L**2/SM.num
+
+        LU = sla.splu(SM.M1.tocsc())
+
+        for k in range(1,simTime):
+            SM.BuildPeriodic()
+            c = scalarInterp(SM.x_periodic,SM.y_periodic,SM.scalar_periodic,pos)
+            SM.BuildPeriodic()
+            grad_c = scalarGrad(SM.L,SM.x_periodic,SM.y_periodic,SM.scalar_periodic,pos)
+
+            pos,vel = RTTK(SM.k,SM.delta,SM.L,pos,vel,c,grad_c,Turn,tvv)
+
+            depStr = SM.depFcn(c,SM.depMaxStr,SM.depThreshold,SM.depTransWidth)
+
+            f = Update(SM.N,SM.L,SM.k,Std,SM.num,depStr,pos,SM.xm,SM.ym,intDelta,meshsize,boundaryCutoff)
+
+            SM.scalar = LU.solve(SM.M2.dot(SM.scalar)+SM.k*(PlankDensity)*f)
+
+            CHEM[0,:,:] = CHEM[1]
+            CHEM[1,:,:] = SM.Meshed()
+            POS[0,:,:] = POS[1]
+            POS[1,:,:] = pos
+            
+            TotChemC[m,Job,k] = np.sum(CHEM[1].flatten())*(LL/meshsize)**2
+            
+            A, B = np.gradient(CHEM[1],LL/meshsize)
+            TotalGradC[m,Job,k] = np.sum(np.sqrt(A**2 + B**2))*(LL/meshsize)**2
+```
+
+```{python}
+meshsize = 400  #Chemical Mesh size
+numb = 160000  #Number of plankton in simulation
+LL = 10 #Length of domain [0,L] x [0,L]
+dt = 0.01 #Time-stepping size
+TotalTime = 300 #Total non-dimensional time 
+simTime = int(TotalTime/dt) #Number of timesteps in order to achieve total Time 
+loops = 10 #Number of simulations
+
+Turn = 1
+Means = np.linspace(.75,np.pi-.75,15,dtype=float)
+
+TotalGradA = np.zeros((len(Means),loops,simTime))
+TotChemA = np.zeros((len(Means),loops,simTime))
+
+j = 1 #Constant Deposition Function
+
+for m in range(len(Means)):
+    
+    tvv = np.array([Means[m]-.75,Means[m]+.75])
+
+    for Job in range(loops):
+
+        if (j == 0):
+            SM = PS.Plankton(DP.constantDep,d1=.1,d2=4,N = meshsize,depMaxStr=.01,
+                        Const=3,L=LL,k=dt,delta=1e-3,depThreshold=0.012, 
+                    depTransWidth=0.008, num = numb, c0=0.01)
+        if (j == 1):
+            SM = PS.Plankton(DP.atanDep,d1=.1,d2=4,N = meshsize,depMaxStr=.01,
+                       Const=3,L=LL,k=dt,delta=1e-3,depThreshold=0.012, 
+                      depTransWidth=0.0007, num = numb, c0=0.01)
+
+        if (j == 2):
+            SM = PS.Plankton(DP.linAtanDep,d1=.1,d2=4,N = meshsize,depMaxStr=.01,
+                       Const=3,L=LL,k=dt,delta=1e-3,depThreshold=0.012, 
+                       depTransWidth=0.008, num = numb, c0=0.01)
+
+        SM.SetIC(initial_conditions)
+
+        lenn = int(np.sqrt(numb))
+        pos = np.zeros((1,2))
+        vel = np.zeros((1,2))
+
+        #Place plankton down uniformly throughout the domain and give each a direction to travel initially
+        for l in range(0,lenn):
+            for k in range(0,lenn):
+                pos = np.append(pos,[np.array([np.mod(k*(SM.L*1/(lenn)) + 0.5*(SM.L*1/(lenn)),SM.L),
+                        np.mod(l*(SM.L*1/(lenn)) + 0.5*(SM.L*1/(lenn)),SM.L)])],axis=0)
+                th  = rand()*2*pi
+                vel = np.append(vel,[np.array([np.cos(th),np.sin(th)])],axis=0)
+
+        pos = np.delete(pos,0,0)
+        vel = np.delete(vel,0,0)
+        pos_store = list([pos[:,:]])
+        pos_store = list([np.array(pos)])
+        scalar_store = list([SM.Meshed()])
+
+        CHEM = np.zeros((2,meshsize,meshsize))
+        POS = np.zeros((2,numb,2))
+        CHEM[1,:,:] = scalar_store[0] #preallocate the chemical 
+        POS[1,:,:] = pos_store[0] #preallocate the plankton
+        
+        TotalGradA[m,Job,0] = np.sum(np.absolute(np.gradient(CHEM[1],LL/meshsize)))*(LL/meshsize)**2
+        TotChemA[m,Job,0] = np.sum(CHEM[1].flatten())*(LL/meshsize)**2
+
+        boundaryCutoff = 64*SM.depVar
+        intDelta = int((SM.N - 1)*8*np.sqrt(SM.depVar)/SM.L+0.5)
+        Std = SM.depVar
+        meshsize = SM.N
+        PlankDensity = SM.density*SM.L**2/SM.num
+
+        LU = sla.splu(SM.M1.tocsc())
+
+        for k in range(1,simTime):
+            SM.BuildPeriodic()
+            c = scalarInterp(SM.x_periodic,SM.y_periodic,SM.scalar_periodic,pos)
+            SM.BuildPeriodic()
+            grad_c = scalarGrad(SM.L,SM.x_periodic,SM.y_periodic,SM.scalar_periodic,pos)
+
+            pos,vel = RTTK(SM.k,SM.delta,SM.L,pos,vel,c,grad_c,Turn,tvv)
+
+            depStr = SM.depFcn(c,SM.depMaxStr,SM.depThreshold,SM.depTransWidth)
+
+            f = Update(SM.N,SM.L,SM.k,Std,SM.num,depStr,pos,SM.xm,SM.ym,intDelta,meshsize,boundaryCutoff)
+
+            SM.scalar = LU.solve(SM.M2.dot(SM.scalar)+SM.k*(PlankDensity)*f)
+
+            CHEM[0,:,:] = CHEM[1]
+            CHEM[1,:,:] = SM.Meshed()
+            POS[0,:,:] = POS[1]
+            POS[1,:,:] = pos
+            
+            TotChemA[m,Job,k] = np.sum(CHEM[1].flatten())*(LL/meshsize)**2
+            
+            A, B = np.gradient(CHEM[1],LL/meshsize)
+            TotalGradA[m,Job,k] = np.sum(np.sqrt(A**2 + B**2))*(LL/meshsize)**2
+```
+
+```{python}
+meshsize = 400  #Chemical Mesh size
+numb = 160000  #Number of plankton in simulation
+LL = 10 #Length of domain [0,L] x [0,L]
+dt = 0.01 #Time-stepping size
+TotalTime = 300 #Total non-dimensional time 
+simTime = int(TotalTime/dt) #Number of timesteps in order to achieve total Time 
+loops = 10 #Number of simulations
+
+Turn = 1
+Means = np.linspace(.75,np.pi-.75,15,dtype=float)
+
+TotalGradL = np.zeros((len(Means),loops,simTime))
+TotChemL = np.zeros((len(Means),loops,simTime))
+
+j = 2 #Constant Deposition Function
+
+for m in range(len(Means)):
+    
+    tvv = np.array([Means[m]-.75,Means[m]+.75])
+
+    for Job in range(loops):
+
+        if (j == 0):
+            SM = PS.Plankton(DP.constantDep,d1=.1,d2=4,N = meshsize,depMaxStr=.01,
+                        Const=3,L=LL,k=dt,delta=1e-3,depThreshold=0.012, 
+                    depTransWidth=0.008, num = numb, c0=0.01)
+        if (j == 1):
+            SM = PS.Plankton(DP.atanDep,d1=.1,d2=4,N = meshsize,depMaxStr=.01,
+                       Const=3,L=LL,k=dt,delta=1e-3,depThreshold=0.012, 
+                      depTransWidth=0.0007, num = numb, c0=0.01)
+
+        if (j == 2):
+            SM = PS.Plankton(DP.linAtanDep,d1=.1,d2=4,N = meshsize,depMaxStr=.01,
+                       Const=3,L=LL,k=dt,delta=1e-3,depThreshold=0.012, 
+                       depTransWidth=0.008, num = numb, c0=0.01)
+
+        SM.SetIC(initial_conditions)
+
+        lenn = int(np.sqrt(numb))
+        pos = np.zeros((1,2))
+        vel = np.zeros((1,2))
+
+        #Place plankton down uniformly throughout the domain and give each a direction to travel initially
+        for l in range(0,lenn):
+            for k in range(0,lenn):
+                pos = np.append(pos,[np.array([np.mod(k*(SM.L*1/(lenn)) + 0.5*(SM.L*1/(lenn)),SM.L),
+                        np.mod(l*(SM.L*1/(lenn)) + 0.5*(SM.L*1/(lenn)),SM.L)])],axis=0)
+                th  = rand()*2*pi
+                vel = np.append(vel,[np.array([np.cos(th),np.sin(th)])],axis=0)
+
+        pos = np.delete(pos,0,0)
+        vel = np.delete(vel,0,0)
+        pos_store = list([pos[:,:]])
+        pos_store = list([np.array(pos)])
+        scalar_store = list([SM.Meshed()])
+
+        CHEM = np.zeros((2,meshsize,meshsize))
+        POS = np.zeros((2,numb,2))
+        CHEM[1,:,:] = scalar_store[0] #preallocate the chemical 
+        POS[1,:,:] = pos_store[0] #preallocate the plankton
+        
+        TotalGradL[m,Job,0] = np.sum(np.absolute(np.gradient(CHEM[1],LL/meshsize)))*(LL/meshsize)**2
+        TotChemL[m,Job,0] = np.sum(CHEM[1].flatten())*(LL/meshsize)**2
+
+        boundaryCutoff = 64*SM.depVar
+        intDelta = int((SM.N - 1)*8*np.sqrt(SM.depVar)/SM.L+0.5)
+        Std = SM.depVar
+        meshsize = SM.N
+        PlankDensity = SM.density*SM.L**2/SM.num
+
+        LU = sla.splu(SM.M1.tocsc())
+
+        for k in range(1,simTime):
+            SM.BuildPeriodic()
+            c = scalarInterp(SM.x_periodic,SM.y_periodic,SM.scalar_periodic,pos)
+            SM.BuildPeriodic()
+            grad_c = scalarGrad(SM.L,SM.x_periodic,SM.y_periodic,SM.scalar_periodic,pos)
+
+            pos,vel = RTTK(SM.k,SM.delta,SM.L,pos,vel,c,grad_c,Turn,tvv)
+
+            depStr = SM.depFcn(c,SM.depMaxStr,SM.depThreshold,SM.depTransWidth)
+
+            f = Update(SM.N,SM.L,SM.k,Std,SM.num,depStr,pos,SM.xm,SM.ym,intDelta,meshsize,boundaryCutoff)
+
+            SM.scalar = LU.solve(SM.M2.dot(SM.scalar)+SM.k*(PlankDensity)*f)
+
+            CHEM[0,:,:] = CHEM[1]
+            CHEM[1,:,:] = SM.Meshed()
+            POS[0,:,:] = POS[1]
+            POS[1,:,:] = pos
+            
+            TotChemL[m,Job,k] = np.sum(CHEM[1].flatten())*(LL/meshsize)**2
+            
+            A, B = np.gradient(CHEM[1],LL/meshsize)
+            TotalGradL[m,Job,k] = np.sum(np.sqrt(A**2 + B**2))*(LL/meshsize)**2
+```
+
+## Fig. 5.5a-c - Total Variation in the system for all deposition functions with varied turning kernel means
+
+```{python}
+fig, ax = plt.subplots(figsize=(7,5),tight_layout=True)
+
+colors = ['#648FFF','#785EF0','#DC267F','#FE6100','#FFB000'] #Using IBM Colorblind Scheme 
+markers = ['D','o','s','']
+linestyles=['-','--',':']
+
+Means2 = [5,7,9,11,13]
+
+for j in range(len(Means2)):
+    M = Means2[j]
+    SumVar = np.mean(TotalGradC[M,:,:],axis=0)
+    Std = np.std(TotalGradC[M,:,:],axis=0)
+    
+    times = np.linspace(0,300,len(Std))
+    
+    ax.fill_between(times,SumVar-Std,SumVar-Std,color=colors[j],alpha=.3)
+    
+    ax.plot(times,SumVar,color=colors[np.mod(j,5)],linestyle = linestyles[np.mod(j,3)],
+            marker = markers[np.mod(j,4)],markevery=int(300/0.1),linewidth=2.8,
+            label=r'$\mu = {0}$'.format(round(Means[j],3)))
+    
+ax.set_xlabel(r'Time, $t$',fontsize=20)
+ax.set_ylabel(r'$V(t)$',fontsize=20)
+ax.set_title('Total Variation, $f_1$',fontsize=20)
+ax.tick_params(labelsize=18)
+ax.set_xlim(0,300)
+ax.legend(fontsize=16)
+
+plt.savefig('./Figures/Fig5_5a.png')
+```
+
+```{python}
+fig, ax = plt.subplots(figsize=(7,5),tight_layout=True)
+
+colors = ['#648FFF','#785EF0','#DC267F','#FE6100','#FFB000'] #Using IBM Colorblind Scheme 
+markers = ['D','o','s','']
+linestyles=['-','--',':']
+
+Means2 = [5,7,9,11,13]
+
+for j in range(len(Means2)):
+    M = Means2[j]
+    SumVar = np.mean(TotalGradA[M,:,:],axis=0)
+    Std = np.std(TotalGradA[M,:,:],axis=0)
+    
+    times = np.linspace(0,300,len(Std))
+    
+    ax.fill_between(times,SumVar-Std,SumVar-Std,color=colors[j],alpha=.3)
+    
+    ax.plot(times,SumVar,color=colors[np.mod(j,5)],linestyle = linestyles[np.mod(j,3)],
+            marker = markers[np.mod(j,4)],markevery=int(300/0.1),linewidth=2.8,
+            label=r'$\mu = {0}$'.format(round(Means[j],3)))
+    
+ax.set_xlabel(r'Time, $t$',fontsize=20)
+ax.set_ylabel(r'$V(t)$',fontsize=20)
+ax.set_title('Total Variation, $f_2$',fontsize=20)
+ax.tick_params(labelsize=18)
+ax.set_xlim(0,300)
+ax.legend(fontsize=16)
+
+plt.savefig('./Figures/Fig5_5b.png')
+```
+
+```{python}
+fig, ax = plt.subplots(figsize=(7,5),tight_layout=True)
+
+colors = ['#648FFF','#785EF0','#DC267F','#FE6100','#FFB000'] #Using IBM Colorblind Scheme 
+markers = ['D','o','s','']
+linestyles=['-','--',':']
+
+Means2 = [5,7,9,11,13]
+
+for j in range(len(Means2)):
+    M = Means2[j]
+    SumVar = np.mean(TotalGradL[M,:,:],axis=0)
+    Std = np.std(TotalGradL[M,:,:],axis=0)
+    
+    times = np.linspace(0,300,len(Std))
+    
+    ax.fill_between(times,SumVar-Std,SumVar-Std,color=colors[j],alpha=.3)
+    
+    ax.plot(times,SumVar,color=colors[np.mod(j,5)],linestyle = linestyles[np.mod(j,3)],
+            marker = markers[np.mod(j,4)],markevery=int(300/0.1),linewidth=2.8,
+            label=r'$\mu = {0}$'.format(round(Means[j],3)))
+    
+ax.set_xlabel(r'Time, $t$',fontsize=20)
+ax.set_ylabel(r'$V(t)$',fontsize=20)
+ax.set_title('Total Variation, $f_3$',fontsize=20)
+ax.tick_params(labelsize=18)
+ax.set_xlim(0,300)
+ax.legend(fontsize=16)
+
+plt.savefig('./Figures/Fig5_5c.png')
+```
+
+## Fig. 5.5d - Total Variation at $t = 300$ for varied turning kernel mean and deposition function
+
+```{python}
+fig, ax = plt.subplots(figsize=(7,5),tight_layout=True)
+
+colors = ['#000000','#009E73','#D55E00'] 
+lins = ['--','-',':']
+
+Deps = ['C','A','L']
+for j in range(len(Deps)):
+    
+    SumChem = np.mean(TotChem[j,:,:],axis=0)
+    Std = np.std(TotChem[j,:,:],axis=0)
+    
+    
+    times = np.linspace(0,300,Std)
+    
+    ax.fill_between(times,SumChem-Std,SumChem-Std,color=colors[j],alpha=.3)
+    
+    ax.plot(times,SumChem,color=colors[j],linestyle = lins[j],linewidth=2.8,label=r'$f_{0}(c)$'.format(j+1))
+
+ax.set_xlabel(r'Time, $t$',fontsize=20)
+ax.set_ylabel(r'$C(t)$',fontsize=20)
+ax.set_title('Total Chemical',fontsize=20)
+
+ax.tick_params(labelsize=18)
+
+ax.set_xlim(0,300)
+ax.legend(fontsize=16)
+
+plt.savefig('./Figures/Fig4_8a.png')
+```
+
+```{python}
+fig, ax = plt.subplots(figsize=(7,5),tight_layout=True)
+
+VarC = []
+VarA = []
+VarL = []
+for j in range(4,len(Means)):
+    SumVarC = np.mean(TotalGradC[j,:,:],axis=0)
+    SumVarA = np.mean(TotalGradA[j,:,:],axis=0)
+    SumVarL = np.mean(TotalGradL[j,:,:],axis=0)
+    
+    VarC = np.append(VarC,SumVarC[-1])
+    VarA = np.append(VarA,SumVarA[-1])
+    VarL = np.append(VarL,SumVarL[-1])
+
+fig, ax = plt.subplots(figsize=(7,5),tight_layout=True)
+colors = ['#000000','#009E73','#D55E00'] 
+
+ax.plot(Means[4:], Vals,color=colors[0],marker='o',linestyle='',label='$f_1(c)$',markersize=8)
+ax.plot(Means[4:], Vals2,color=colors[1],marker='^',linestyle='',label='$f_2(c)$',markersize=8)
+ax.plot(Means[4:], Vals3,color=colors[2],marker='s',linestyle='',label='$f_3(c)$',markersize=8)
+
+ax.set_xlabel(r'Mean of $P_1$, $\mu$',fontsize=20)
+ax.set_ylabel(r'$V(t = 300)$',fontsize=20)
+ax.set_title('Total Variation at $t = 300$ vs. Mean of $P_1$',fontsize=20)
+ax.tick_params(labelsize=18)
+ax.legend(fontsize=20,loc=0)
+
+plt.savefig('./Figures/Fig5_5d.png')
+```
+
+## Fig. 5.5e - Total Variation in the system for $f_1$ and a turning kernel with a singular angle
+
+```{python}
+meshsize = 400  #Chemical Mesh size
+numb = 160000  #Number of plankton in simulation
+LL = 10 #Length of domain [0,L] x [0,L]
+dt = 0.01 #Time-stepping size
+TotalTime = 300 #Total non-dimensional time 
+simTime = int(TotalTime/dt) #Number of timesteps in order to achieve total Time 
+loops = 10 #Number of simulations
+
+Turn = 4
+Means = np.linspace(0,np.pi,15,dtype=float)
+
+TotalGradS = np.zeros((len(Means),loops,simTime))
+
+j = 0 #Constant Deposition Function
+
+for m in range(len(Means)):
+    
+    tvv = np.array([Means[m]])
+
+    for Job in range(loops):
+
+        if (j == 0):
+            SM = PS.Plankton(DP.constantDep,d1=.1,d2=4,N = meshsize,depMaxStr=.01,
+                        Const=3,L=LL,k=dt,delta=1e-3,depThreshold=0.012, 
+                    depTransWidth=0.008, num = numb, c0=0.01)
+        if (j == 1):
+            SM = PS.Plankton(DP.atanDep,d1=.1,d2=4,N = meshsize,depMaxStr=.01,
+                       Const=3,L=LL,k=dt,delta=1e-3,depThreshold=0.012, 
+                      depTransWidth=0.0007, num = numb, c0=0.01)
+
+        if (j == 2):
+            SM = PS.Plankton(DP.linAtanDep,d1=.1,d2=4,N = meshsize,depMaxStr=.01,
+                       Const=3,L=LL,k=dt,delta=1e-3,depThreshold=0.012, 
+                       depTransWidth=0.008, num = numb, c0=0.01)
+
+        SM.SetIC(initial_conditions)
+
+        lenn = int(np.sqrt(numb))
+        pos = np.zeros((1,2))
+        vel = np.zeros((1,2))
+
+        #Place plankton down uniformly throughout the domain and give each a direction to travel initially
+        for l in range(0,lenn):
+            for k in range(0,lenn):
+                pos = np.append(pos,[np.array([np.mod(k*(SM.L*1/(lenn)) + 0.5*(SM.L*1/(lenn)),SM.L),
+                        np.mod(l*(SM.L*1/(lenn)) + 0.5*(SM.L*1/(lenn)),SM.L)])],axis=0)
+                th  = rand()*2*pi
+                vel = np.append(vel,[np.array([np.cos(th),np.sin(th)])],axis=0)
+
+        pos = np.delete(pos,0,0)
+        vel = np.delete(vel,0,0)
+        pos_store = list([pos[:,:]])
+        pos_store = list([np.array(pos)])
+        scalar_store = list([SM.Meshed()])
+
+        CHEM = np.zeros((2,meshsize,meshsize))
+        POS = np.zeros((2,numb,2))
+        CHEM[1,:,:] = scalar_store[0] #preallocate the chemical 
+        POS[1,:,:] = pos_store[0] #preallocate the plankton
+        
+        TotalGradS[m,Job,0] = np.sum(np.absolute(np.gradient(CHEM[1],LL/meshsize)))*(LL/meshsize)**2
+
+        boundaryCutoff = 64*SM.depVar
+        intDelta = int((SM.N - 1)*8*np.sqrt(SM.depVar)/SM.L+0.5)
+        Std = SM.depVar
+        meshsize = SM.N
+        PlankDensity = SM.density*SM.L**2/SM.num
+
+        LU = sla.splu(SM.M1.tocsc())
+
+        for k in range(1,simTime):
+            SM.BuildPeriodic()
+            c = scalarInterp(SM.x_periodic,SM.y_periodic,SM.scalar_periodic,pos)
+            SM.BuildPeriodic()
+            grad_c = scalarGrad(SM.L,SM.x_periodic,SM.y_periodic,SM.scalar_periodic,pos)
+
+            pos,vel = RTTK(SM.k,SM.delta,SM.L,pos,vel,c,grad_c,Turn,tvv)
+
+            depStr = SM.depFcn(c,SM.depMaxStr,SM.depThreshold,SM.depTransWidth)
+
+            f = Update(SM.N,SM.L,SM.k,Std,SM.num,depStr,pos,SM.xm,SM.ym,intDelta,meshsize,boundaryCutoff)
+
+            SM.scalar = LU.solve(SM.M2.dot(SM.scalar)+SM.k*(PlankDensity)*f)
+
+            CHEM[0,:,:] = CHEM[1]
+            CHEM[1,:,:] = SM.Meshed()
+            POS[0,:,:] = POS[1]
+            POS[1,:,:] = pos
+                    
+            A, B = np.gradient(CHEM[1],LL/meshsize)
+            TotalGradS[m,Job,k] = np.sum(np.sqrt(A**2 + B**2))*(LL/meshsize)**2
+```
+
+```{python}
+fig, ax = plt.subplots(figsize=(7,5),tight_layout=True)
+
+colors = ['#648FFF','#785EF0','#DC267F','#FE6100','#FFB000'] #Using IBM Colorblind Scheme 
+markers = ['D','o','s','']
+linestyles=['-','--',':']
+
+Means2 = [4,6,8,10,12,14]
+
+for j in range(len(Means2)):
+    M = Means2[j]
+    SumVar = np.mean(TotalGradS[M,:,:],axis=0)
+    Std = np.std(TotalGradS[M,:,:],axis=0)
+    
+    times = np.linspace(0,300,len(Std))
+    
+    ax.fill_between(times,SumVar-Std,SumVar-Std,color=colors[j],alpha=.3)
+    
+    ax.plot(times,SumVar,color=colors[np.mod(j,5)],linestyle = linestyles[np.mod(j,3)],
+            marker = markers[np.mod(j,4)],markevery=int(300/0.1),linewidth=2.8,
+            label=r'$\mu = {0}$'.format(round(Means[j],3)))
+    
+ax.set_xlabel(r'Time, $t$',fontsize=20)
+ax.set_ylabel(r'$V(t)$',fontsize=20)
+ax.set_title('Total Variation, Single Angle',fontsize=20)
+ax.tick_params(labelsize=18)
+ax.set_xlim(0,300)
+ax.legend(fontsize=16)
+
+plt.savefig('./Figures/Fig5_5e.png')
+```
+
+```{python}
+fig, ax = plt.subplots(figsize=(7,5),tight_layout=True)
+
+VarS = []
+for j in range(len(Means)):
+    SumVarS = np.mean(TotalGradS[j,:,:],axis=0)
+    VarS = np.append(VarS,SumVarS[-1])
+
+fig, ax = plt.subplots(figsize=(7,5),tight_layout=True)
+colors = ['#000000','#009E73','#D55E00'] 
+
+ax.plot(Means,Vals,color=colors[0],marker='o',linestyle='',markersize=8)
+
+ax.set_xlabel(r'Mean of $P_1$, $\mu$',fontsize=20)
+ax.set_ylabel(r'$V(t = 300)$',fontsize=20)
+ax.set_title('Total Variation at $t = 300$, Single Angle',fontsize=20)
+ax.tick_params(labelsize=18)
+ax.set_xlim(-.1,np.pi+.1)
+ax.set_xticks([0,np.pi/4,np.pi/2,3*np.pi/4,np.pi])
+ax.set_xticklabels([r'$0$',r'$\pi/4$',r'$\pi/2$',r'$3\pi/4$',r'$\pi$'])
+
+plt.savefig('./Figures/Fig5_5f.png')
+```
+
+## Fig. 5.6 - Total Chemcial in the system at $t = 300$ for varied turning kernel means and deposition functions
+
+```{python}
+fig, ax = plt.subplots(figsize=(7,5),tight_layout=True)
+
+ChemC = []
+ChemA = []
+ChemL = []
+for j in range(4,len(Means)):
+    SumChemC = np.mean(TotChemC[j,:,:],axis=0)
+    SumChemA = np.mean(TotChemA[j,:,:],axis=0)
+    SumChemL = np.mean(TotChemL[j,:,:],axis=0)
+    
+    ChemC = np.append(ChemC,SumChemC[-1])
+    ChemA = np.append(ChemA,SumChemA[-1])
+    ChemL = np.append(ChemL,SumChemL[-1])
+
+fig, ax = plt.subplots(figsize=(7,5),tight_layout=True)
+colors = ['#000000','#009E73','#D55E00'] 
+
+ax.plot(Means[4:], Vals,color=colors[0],marker='o',linestyle='',label='$f_1(c)$',markersize=8)
+ax.plot(Means[4:], Vals2,color=colors[1],marker='^',linestyle='',label='$f_2(c)$',markersize=8)
+ax.plot(Means[4:], Vals3,color=colors[2],marker='s',linestyle='',label='$f_3(c)$',markersize=8)
+
+ax.set_xlabel(r'Mean of $P_1$, $\mu$',fontsize=20)
+ax.set_ylabel(r'$C(t = 300)$',fontsize=20)
+ax.set_title('Total Chemical at $t = 300$ vs. Mean of $P_1$',fontsize=20)
+ax.tick_params(labelsize=18)
+ax.locator_params(nbins=4,axis='y')
+
+ax.legend(fontsize=20,loc=0)
+
+plt.savefig('./Figures/Fig5_6.png')
+```
