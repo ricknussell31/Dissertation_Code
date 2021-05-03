@@ -46,7 +46,7 @@ deltas = np.array([0,.02,.04,.06])
 Planks = np.zeros((418,len(deltas)))
 Chems = np.zeros((418,len(deltas)))
 for k in range(len(deltas)):
-    Swimmers = PM.PlankChem(depFcn=DM.linAtanDep,left=0,right=5,d1=.6,d2=2,N=417,
+    Swimmers = PM.PlankChem(depFcn=DM.constantDep,left=0,right=5,d1=2,d2=5,N=417,
                             dt=0.004,depMaxStr=0.01, depThreshold=0.24, depTransWidth=0.04, delta = deltas[k])
 
     #Global parameters#

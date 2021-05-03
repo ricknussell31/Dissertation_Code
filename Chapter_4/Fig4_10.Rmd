@@ -1,0 +1,456 @@
+---
+jupyter:
+  jupytext:
+    text_representation:
+      extension: .Rmd
+      format_name: rmarkdown
+      format_version: '1.2'
+      jupytext_version: 1.4.2
+  kernelspec:
+    display_name: Python 3
+    language: python
+    name: python3
+---
+
+```{python}
+from scipy import *
+import numpy as np
+import matplotlib.pyplot as plt
+import PlanktonSignaling.basics as PS
+import PlanktonSignaling.Deposition as DP
+
+import scipy.sparse as sp
+from scipy.interpolate import RectBivariateSpline,griddata
+from scipy.sparse.linalg import spsolve
+from scipy.linalg import solve
+from scipy.sparse import linalg as sla
+from scipy import sparse
+from numba import int32, float32, float64, int64, njit, prange
+from numpy import exp
+from numba import prange
+
+# %matplotlib notebook
+```
+
+```{python}
+def initial_conditions(x,y):
+    return(0*x + 0.01)
+
+def scalarInterp(x_periodic,y_periodic,scalar_periodic,pos):
+    bspline = RectBivariateSpline(x_periodic,y_periodic,scalar_periodic)
+    return(bspline.ev(pos[:,1],pos[:,0]))
+
+
+
+def scalarGrad(L,x_periodic,y_periodic,scalar_periodic,xp,dx=1.0e-4):
+    dx = dx*L
+    bspline = RectBivariateSpline(x_periodic,y_periodic,scalar_periodic)
+    p = np.array([np.mod(xp + np.array([dx,0]),L),np.mod(xp - np.array([dx,0]),L),np.mod(xp + np.array([0,dx]),L),
+                                  np.mod(xp - np.array([0,dx]),L)])
+
+    dp = bspline.ev(p[:,:,1],p[:,:,0])
+
+    diffs = np.array([dp[0]-dp[1],dp[2]-dp[3]])/2/dx
+    diffs = diffs.T
+    return(diffs)
+
+@njit
+def RT(k,delta,L,pos,vel,c,grad_c):
+    # Actually, I need to do this as tumble and run, TR.
+    for j in range(len(pos)):
+        Dot = np.dot(vel[j],grad_c[j])
+        alpha = 1/np.sqrt(delta**2 + Dot**2)
+        if (rand() < k*0.5*(1-alpha*Dot)):
+            th = rand()*2*pi
+            vel[j] = np.array([np.cos(th),np.sin(th)])
+    for j in range(len(pos)):
+        pos[j] += k*vel[j]
+        pos[j] = np.mod(pos[j],L)
+    return(pos,vel)
+
+@njit(parallel=True) 
+def Update(N,L,k,Std,num,depStr,pos,xm,ym,intDelta,meshsize,boundaryCutoff):    
+    
+    f = np.zeros((N,N),dtype=float32)
+    #f = np.zeros((N,N))
+    for i in prange(num):
+        Str = depStr[i]
+        p = pos[i]
+        A, B, C, D = 0,0,0,0
+        centerX = int((meshsize-1)*p[0]/L+0.5)
+        centerY = int((meshsize-1)*p[1]/L+0.5)
+        lowerX      = max(0,centerX-intDelta)
+        lowerXplus  = max(0,centerX-intDelta + (meshsize-1))
+        lowerXminus = max(0,centerX-intDelta - (meshsize-1))
+        upperX      = min(meshsize,centerX+intDelta)
+        upperXplus  = min(meshsize,centerX+intDelta + (meshsize-1))
+        upperXminus = min(meshsize,centerX+intDelta - (meshsize-1))
+        lowerY      = max(0,centerY-intDelta)
+        lowerYplus  = max(0,centerY-intDelta + (meshsize-1))
+        lowerYminus = max(0,centerY-intDelta - (meshsize-1))
+        upperY      = min(meshsize,centerY+intDelta)
+        upperYplus  = min(meshsize,centerY+intDelta + (meshsize-1))
+        upperYminus = min(meshsize,centerY+intDelta - (meshsize-1))
+        sliceX = slice(lowerX,upperX+1)
+        sliceY = slice(lowerY,upperY+1)
+        f[sliceY,sliceX] += Str*(1/(4*pi*Std))*exp(-((xm[sliceY,sliceX]-p[0])**2
+                               +(ym[sliceY,sliceX]-p[1])**2)/4/Std)
+        if ((p[0])**2<boundaryCutoff):
+            sliceX = slice(lowerXplus,upperXplus+1)
+            sliceY = slice(lowerY,upperY+1)
+            f[sliceY,sliceX] += Str*(1/(4*pi*Std))*exp(-((xm[sliceY,sliceX]-p[0]-L)**2
+                                           +(ym[sliceY,sliceX]-p[1])**2)/4/Std)
+            A = 1
+        if ((p[0]-L)**2<boundaryCutoff):
+            sliceX = slice(lowerXminus,upperXminus+1)
+            sliceY = slice(lowerY,upperY+1)
+            f[sliceY,sliceX] += Str*(1/(4*pi*Std))*exp(-((xm[sliceY,sliceX]-p[0]+L)**2
+                                       +(ym[sliceY,sliceX]-p[1])**2)/4/Std)
+            B = 1
+        if ((p[1])**2<boundaryCutoff):
+            sliceX = slice(lowerX,upperX+1)
+            sliceY = slice(lowerYplus,upperYplus+1)
+            f[sliceY,sliceX] += Str*(1/(4*pi*Std))*exp(-((xm[sliceY,sliceX]-p[0])**2
+                                    +(ym[sliceY,sliceX]-p[1]-L)**2)/4/Std)
+            C = 1
+        if ((p[1]-L)**2<boundaryCutoff):
+            sliceX = slice(lowerX,upperX+1)
+            sliceY = slice(lowerYminus,upperYminus+1)
+            f[sliceY,sliceX] += Str*(1/(4*pi*Std))*exp(-((xm[sliceY,sliceX]-p[0])**2
+                                +(ym[sliceY,sliceX]-p[1]+L)**2)/4/Std)
+            D = 1
+        if (A == 1 and C == 1): #Plankton in Lower Left Corner
+            sliceX = slice(lowerXplus,upperXplus+1)
+            sliceY = slice(lowerYplus,upperYplus+1)
+            f[sliceY,sliceX] += Str*(1/(4*pi*Std))*exp(-((xm[sliceY,sliceX]-p[0]-L)**2
+                                 +(ym[sliceY,sliceX]-p[1]-L)**2)/4/Std)
+        if (A == 1 and D == 1): #Plankton in Lower Left Corner
+            sliceX = slice(lowerXplus,upperXplus+1)
+            sliceY = slice(lowerYminus,upperYminus+1)
+            f[sliceY,sliceX] += Str*(1/(4*pi*Std))*exp(-((xm[sliceY,sliceX]-p[0]-L)**2
+                                   +(ym[sliceY,sliceX]-p[1]+L)**2)/4/Std)
+        elif (B == 1 and C == 1): #Plankton in Upper Right Corner
+            sliceX = slice(lowerXminus,upperXminus+1)
+            sliceY = slice(lowerYplus,upperYplus+1)
+            f[sliceY,sliceX] += Str*(1/(4*pi*Std))*exp(-((xm[sliceY,sliceX]-p[0]+L)**2
+                                    +(ym[sliceY,sliceX]-p[1]-L)**2)/4/Std)
+        elif (B == 1 and D == 1): #Plankton in Lower Right Corner
+            sliceX = slice(lowerXminus,upperXminus+1)
+            sliceY = slice(lowerYminus,upperYminus+1)
+            f[sliceY,sliceX] += Str*(1/(4*pi*Std))*exp(-((xm[sliceY,sliceX]-p[0]+L)**2
+                                    +(ym[sliceY,sliceX]-p[1]+L)**2)/4/Std)
+
+    f = f.reshape((N**2,))
+    return(f)
+
+def planktonProjection(pos,meshsize):
+    
+    x = r_[0:Swimmers.L:1j*meshsize] # setup the spatial mesh. It is a long row vector
+    # Create some local coordinates for the square domain.
+    y = 1*x
+    xm,ym = np.meshgrid(x,y)
+    f = np.zeros((meshsize,meshsize))
+    Std = Swimmers.depVar
+
+    boundaryCutoff = 64*Std
+    
+    intDelta = int((meshsize)*8*np.sqrt(Std)/Swimmers.L + 0.5)
+    
+    for i in range(0,Swimmers.num):
+        A, B, C, D = 0,0,0,0
+        p = pos[i,:]
+        
+        centerX = int((meshsize-1)*p[0]/Swimmers.L+0.5)
+        centerY = int((meshsize-1)*p[1]/Swimmers.L+0.5)
+        
+        lowerX      = max(0,centerX-intDelta)
+        lowerXplus  = max(0,centerX-intDelta + (meshsize-1))
+        lowerXminus = max(0,centerX-intDelta - (meshsize-1))
+        upperX      = min(meshsize,centerX+intDelta)
+        upperXplus  = min(meshsize,centerX+intDelta + (meshsize-1))
+        upperXminus = min(meshsize,centerX+intDelta - (meshsize-1))
+        lowerY      = max(0,centerY-intDelta)
+        lowerYplus  = max(0,centerY-intDelta + (meshsize-1))
+        lowerYminus = max(0,centerY-intDelta - (meshsize-1))
+        upperY      = min(meshsize,centerY+intDelta)
+        upperYplus  = min(meshsize,centerY+intDelta + (meshsize-1))
+        upperYminus = min(meshsize,centerY+intDelta - (meshsize-1))
+        
+        sliceX = slice(lowerX,upperX+1)
+        sliceY = slice(lowerY,upperY+1)
+        
+        f[sliceY,sliceX] = f[sliceY,sliceX] + (1/(4*pi*Std))*np.exp(-((xm[sliceY,sliceX]-p[0])**2+
+                                                                      (ym[sliceY,sliceX]-p[1])**2)/4/Std)
+        if ((p[0])**2<boundaryCutoff):
+            sliceX = slice(lowerXplus,upperXplus+1)
+            sliceY = slice(lowerY,upperY+1)
+            f[sliceY,sliceX] = f[sliceY,sliceX] + (1/(4*pi*Std))*np.exp(-((xm[sliceY,sliceX]-p[0]-Swimmers.L)**2+
+                                                                          (ym[sliceY,sliceX]-p[1])**2)/4/Std)
+            A = 1
+        if ((p[0]-Swimmers.L)**2<boundaryCutoff):
+            sliceX = slice(lowerXminus,upperXminus+1)
+            sliceY = slice(lowerY,upperY+1)
+            f[sliceY,sliceX] = f[sliceY,sliceX] + (1/(4*pi*Std))*np.exp(-((xm[sliceY,sliceX]-p[0]+Swimmers.L)**2+
+                                                                          (ym[sliceY,sliceX]-p[1])**2)/4/Std)
+            B = 1
+        if ((p[1])**2<boundaryCutoff):
+            sliceX = slice(lowerX,upperX+1)
+            sliceY = slice(lowerYplus,upperYplus+1)
+            f[sliceY,sliceX] = f[sliceY,sliceX] + (1/(4*pi*Std))*np.exp(-((xm[sliceY,sliceX]-p[0])**2+
+                                                                          (ym[sliceY,sliceX]-p[1]-Swimmers.L)**2)/4/Std)
+            C = 1
+        if ((p[1]-Swimmers.L)**2<boundaryCutoff):
+            sliceX = slice(lowerX,upperX+1)
+            sliceY = slice(lowerYminus,upperYminus+1)
+            f[sliceY,sliceX] = f[sliceY,sliceX] + (1/(4*pi*Std))*np.exp(-((xm[sliceY,sliceX]-p[0])**2+
+                                                                          (ym[sliceY,sliceX]-p[1]+Swimmers.L)**2)/4/Std)
+            D = 1
+        if (A == 1 and C == 1): #Plankton in Lower Left Corner
+            sliceX = slice(lowerXplus,upperXplus+1)
+            sliceY = slice(lowerYplus,upperYplus+1)
+            f[sliceY,sliceX] = f[sliceY,sliceX] + (1/(4*pi*Std))*np.exp(-((xm[sliceY,sliceX]-p[0]-Swimmers.L)**2+
+                                                                          (ym[sliceY,sliceX]-p[1]-Swimmers.L)**2)/4/Std)
+        if (A == 1 and D == 1): #Plankton in Lower Left Corner
+            sliceX = slice(lowerXplus,upperXplus+1)
+            sliceY = slice(lowerYminus,upperYminus+1)
+            f[sliceY,sliceX] = f[sliceY,sliceX] + (1/(4*pi*Std))*np.exp(-((xm[sliceY,sliceX]-p[0]-Swimmers.L)**2+
+                                                                          (ym[sliceY,sliceX]-p[1]+Swimmers.L)**2)/4/Std)
+        if (B == 1 and C == 1): #Plankton in Upper Right Corner
+            sliceX = slice(lowerXminus,upperXminus+1)
+            sliceY = slice(lowerYplus,upperYplus+1)
+            f[sliceY,sliceX] = f[sliceY,sliceX] + (1/(4*pi*Std))*np.exp(-((xm[sliceY,sliceX]-p[0]+Swimmers.L)**2+
+                                                                          (ym[sliceY,sliceX]-p[1]-Swimmers.L)**2)/4/Std)
+        if (B == 1 and D == 1): #Plankton in Lower Right Corner
+            sliceX = slice(lowerXminus,upperXminus+1)
+            sliceY = slice(lowerYminus,upperYminus+1)
+            f[sliceY,sliceX] = f[sliceY,sliceX] + (1/(4*pi*Std))*np.exp(-((xm[sliceY,sliceX]-p[0]+Swimmers.L)**2+
+                                                                          (ym[sliceY,sliceX]-p[1]+Swimmers.L)**2)/4/Std)
+    return xm,ym,f*(Swimmers.L**2/Swimmers.num)
+```
+
+```{python}
+meshsize = 400  #Chemical Mesh size
+numb = 160000  #Number of plankton in simulation
+LL = 10 #Length of domain [0,L] x [0,L]
+dt = 0.01 #Time-stepping size
+TotalTime = 300 #Total non-dimensional time 
+simTime = int(TotalTime/dt) #Number of timesteps in order to achieve total Time 
+loops = 10 #Number of simulations
+
+Deltas = [1e-3,1e-3.2,1e-3.4,1e-3.6,1e-4.0,1e-5,1e-6]
+
+TotalGrad = np.zeros((len(Deltas),loops,simTime))
+TotChem = np.zeros((len(Deltas),loops,simTime))
+FinalChem = np.zeros((len(Deltas),loops,meshsize,meshsize))
+FinalPlank = np.zeros((len(Deltas),loops,2,numb))
+
+for j in range(len(Deltas)):
+    
+    for Job in range(loops):
+
+        SM = PS.Plankton(DP.atanDep,d1=.1,d2=4,N = meshsize,depMaxStr=.01,
+                       Const=3,L=LL,k=dt,delta=Deltas[j],depThreshold=0.012, 
+                      depTransWidth=0.0007, num = numb, c0=0.01)
+
+
+        SM.SetIC(initial_conditions)
+
+        lenn = int(np.sqrt(numb))
+        pos = np.zeros((1,2))
+        vel = np.zeros((1,2))
+
+        #Place plankton down uniformly throughout the domain and give each a direction to travel initially
+        for l in range(0,lenn):
+            for k in range(0,lenn):
+                pos = np.append(pos,[np.array([np.mod(k*(SM.L*1/(lenn)) + 0.5*(SM.L*1/(lenn)),SM.L),
+                        np.mod(l*(SM.L*1/(lenn)) + 0.5*(SM.L*1/(lenn)),SM.L)])],axis=0)
+                th  = rand()*2*pi
+                vel = np.append(vel,[np.array([np.cos(th),np.sin(th)])],axis=0)
+
+        pos = np.delete(pos,0,0)
+        vel = np.delete(vel,0,0)
+        pos_store = list([pos[:,:]])
+        pos_store = list([np.array(pos)])
+        scalar_store = list([SM.Meshed()])
+
+        CHEM = np.zeros((2,meshsize,meshsize))
+        POS = np.zeros((2,numb,2))
+        CHEM[1,:,:] = scalar_store[0] #preallocate the chemical 
+        POS[1,:,:] = pos_store[0] #preallocate the plankton
+        
+        MaxChem[j,Job,0] = max(CHEM[1].flatten())
+        MinChem[j,Job,0] = min(CHEM[1].flatten())
+        TotalGrad[j,Job,0] = np.sum(np.absolute(np.gradient(CHEM[1],LL/meshsize)))*(LL/meshsize)**2
+        TotChem[j,Job,0] = np.sum(CHEM[1].flatten())*(LL/meshsize)**2
+
+        boundaryCutoff = 64*SM.depVar
+        intDelta = int((SM.N - 1)*8*np.sqrt(SM.depVar)/SM.L+0.5)
+        Std = SM.depVar
+        meshsize = SM.N
+        PlankDensity = SM.density*SM.L**2/SM.num
+
+        LU = sla.splu(SM.M1.tocsc())
+
+        Times = np.linspace(0,simTime,21,dtype=int)
+
+        for k in range(1,simTime):
+            SM.BuildPeriodic()
+            c = scalarInterp(SM.x_periodic,SM.y_periodic,SM.scalar_periodic,pos)
+            SM.BuildPeriodic()
+            grad_c = scalarGrad(SM.L,SM.x_periodic,SM.y_periodic,SM.scalar_periodic,pos)
+
+            pos,vel = RTTK(SM.k,SM.delta,SM.L,pos,vel,c,grad_c,Turn,tvv)
+
+            depStr = SM.depFcn(c,SM.depMaxStr,SM.depThreshold,SM.depTransWidth)
+
+            f = Update(SM.N,SM.L,SM.k,Std,SM.num,depStr,pos,SM.xm,SM.ym,intDelta,meshsize,boundaryCutoff)
+
+            SM.scalar = LU.solve(SM.M2.dot(SM.scalar)+SM.k*(PlankDensity)*f)
+
+            CHEM[0,:,:] = CHEM[1]
+            CHEM[1,:,:] = SM.Meshed()
+            POS[0,:,:] = POS[1]
+            POS[1,:,:] = pos
+            
+            TotChem[j,Job,k] = np.sum(CHEM[1].flatten())*(LL/meshsize)**2
+            A, B = np.gradient(CHEM[1],LL/meshsize)
+            TotalGrad[j,Job,k] = np.sum(np.sqrt(A**2 + B**2))*(LL/meshsize)**2
+            
+        FinalChem[j,Job,:,:] = CHEM[1]
+        FinalPlank[j,Job,:,:] = pos
+```
+
+## Fig. 4.10a - Total Chemical in the system over time for varied $\delta$
+
+```{python}
+fig, ax = plt.subplots(figsize=(7,5),tight_layout=True)
+
+colors = ['#648FFF','#785EF0','#DC267F','#FE6100','#FFB000'] #Using IBM Colorblind Scheme 
+lins = [':','-.','--','-']
+markers = ['o','p','s','^','D']
+
+M = int(0/0.01)
+N = int(300/0.01)
+
+Delts = [3.0,3.2,3.4,3.6,4.0]
+
+for j in range(len(Delts)):
+    
+    SumChem = np.mean(TotChem[j,:,:],axis=0)
+    Std = np.std(TotChem[j,:,:],axis=0)
+    
+    times = np.linspace(0,300,Std)
+    
+    ax.plot(times,SumChem,color=colors[np.mod(j,5)],linestyle = lins[np.mod(j,4)],linewidth=3,
+                label=r'$\delta = 10^{{{0}}}$'.format(-1*Delts[j]))
+    
+    ax.fill_between(times,SumChem-Std,SumChem+Std,color=colors[np.mod(j,5)],alpha=0.2)
+
+ax.set_xlabel(r'Time, $t$',fontsize=20)
+ax.set_ylabel(r'$C(t)$',fontsize=20)
+ax.set_title('Total Chemical, Varied $\delta$',fontsize=20)
+
+ax.tick_params(labelsize=18)
+
+ax.set_xlim(0,300)
+ax.legend(fontsize=16)
+
+plt.savefig('./Figures/Fig4_10a.png')
+```
+
+## Fig. 4.10b - Total Variation over time, $\int_{D} |\nabla c(\mathbf{x},t) | \, d\mathbf{x}$ for varied $\delta$
+
+```{python}
+fig, ax = plt.subplots(figsize=(7,5),tight_layout=True)
+
+colors = ['#648FFF','#785EF0','#DC267F','#FE6100','#FFB000'] #Using IBM Colorblind Scheme 
+lins = [':','-.','--','-']
+markers = ['o','p','s','^','D']
+
+M = int(0.5/0.01)
+
+Delts = [3.0,3.2,3.4,3.6,4.0]
+
+for j in range(len(Delts)):
+    
+    SumVar = np.mean(TotalGrad[j,:,:],axis=0)
+    Std = np.std(TotalGrad[j,:,:],axis=0)
+    
+    times = np.linspace(0,300,Std)
+    
+    ax.semilogx(times[M:],SumVar[M:],color=colors[np.mod(j,5)],linestyle = lins[np.mod(j,4)],linewidth=3,
+                label=r'$\delta = 10^{{{0}}}$'.format(-1*Delts[j]))
+    
+    ax.fill_between(times[M:],SumVar[M:]-Std[M:],SumVar[M:]+Std[M:],color=colors[np.mod(j,5)],alpha=0.2)
+    
+ax.set_xlabel(r'Time, $t$',fontsize=20)
+ax.set_ylabel(r'$V(t)$',fontsize=20)
+ax.set_title('Total Variation',fontsize=20)
+ax.tick_params(labelsize=18)
+ax.set_xlim(M,300)
+ax.legend(fontsize=16)
+
+plt.savefig('./Figures/Fig4_10b.png')
+```
+
+## Fig. 4.10c - Mean value of $|\nabla c|$ at a given $\rho$ at $t = 300$
+
+```{python}
+colors = ['#648FFF','#785EF0','#DC267F','#FE6100','#FFB000'] #Using IBM Colorblind Scheme 
+#colors = ['#648FFF','#DC267F','#FE6100'] #Using IBM Colorblind Scheme 
+
+markers = ['o','p','s','^','D']
+binnum = 250
+Delts = [3,3.2,3.4,3.6,4,5,6]
+
+fig, ax = plt.subplots(figsize=(7,5),tight_layout=True)
+m = .9
+i = 0
+for j in [0,4,5,6]:
+    bin_Tot = np.zeros(binss)
+    PosTot = []
+    GradTot = []
+    for Job in range(loops):
+        hts = FinalPlank[j,Job,:,:]
+        xm, ym, ContoursSlice = plankProjection(hts,400)
+        PosTot = np.append(PosTot,ContoursSlice.flatten())
+
+        Chem = FinalChem[j,Job,:,:]
+        Grad = np.gradient(Chem,LL/meshsize)
+        GradTot = np.append(GradTot,np.sqrt(np.multiply(Grad[0],Grad[0])+np.multiply(Grad[1],Grad[1])).flatten())
+
+        print(r'Finish $J = {0}$'.format(J))
+
+    bin_means, xs, binnumber = binned_statistic(PosTot,GradTot,statistic='mean',range=(1-m,1+m),bins=binnum)
+    bin_std, xs, binnumber = binned_statistic(PosTot,GradTot,statistic='std',range=(1-m,1+m),bins=binnum)
+                                          
+    where_are_NaNs = np.isnan(bin_means)
+    bin_means[where_are_NaNs] = 0
+    where_are_NaNs2 = np.isnan(bin_std)
+    bin_std[where_are_NaNs2] = 0
+    xs = (xs[1:] + xs[:-1])/2
+    ax.plot(xs,bin_means,color=colors[i],
+                    linestyle =linstyles[i],linewidth=3,
+                label=r'$\delta = 10^{{{}}}$'.format(-Delts[j]))
+
+    ax.fill_between(xs,bin_means-bin_std,bin_means+bin_std,color=colors[i],alpha=.15)
+    
+    i += 1
+    
+ax.set_ylabel(r'Chemical Gradient, $\left \langle | \nabla c | \right \rangle$',fontsize=16)
+ax.set_xlabel(r'Plankton Density, $\rho$',fontsize=20)
+ax.tick_params(labelsize=18)
+ax.legend(fontsize=19,loc=0)
+ax.ticklabel_format(style='sci',axis='y',scilimits=(-3,-2),useMathText=True)
+ax.yaxis.get_offset_text().set_fontsize(18)
+ax.locator_params(nbins=3,axis='y')
+
+ax.set_xticks([.5,1,1.5])
+ax.set_xticklabels([r'$\overline{\rho}/2$',r'$\overline{\rho}$',r'$3\overline{\rho}/2$'])
+ax.axhline(1e-3,linestyle='--',color='k',alpha=0.5)
+ax.axhline(1e-4,linestyle='--',color='k',alpha=0.5)
+ax.set_title(r'$\rho$ vs. $\left \langle | \nabla c | \right \rangle$ at $t = {0}$'.format(T),fontsize=20)
+ax.set_xlim(1-m,1+m)
+
+plt.savefig('./Figures/Fig4_10c.png')
+```
