@@ -30,6 +30,7 @@ from numpy import exp
 from numba import prange
 from numpy.random import rand, uniform, triangular, choice, vonmises
 
+
 # %matplotlib notebook
 ```
 
@@ -40,7 +41,6 @@ def initial_conditions(x,y):
 def scalarInterp(x_periodic,y_periodic,scalar_periodic,pos):
     bspline = RectBivariateSpline(x_periodic,y_periodic,scalar_periodic)
     return(bspline.ev(pos[:,1],pos[:,0]))
-
 
 
 def scalarGrad(L,x_periodic,y_periodic,scalar_periodic,xp,dx=1.0e-4):
@@ -157,6 +157,30 @@ def Update(N,L,k,Std,num,depStr,pos,xm,ym,intDelta,meshsize,boundaryCutoff):
 
     f = f.reshape((N**2,))
     return(f)
+
+@njit(parallel=True)
+def Calc_Dist(POS,L):
+    #find distance of every particle from particle j using periodic boundary conditions
+        posx = POS[:,0]
+        posy = POS[:,1]
+
+        Dists = np.zeros(len(posy),dtype=float32)
+
+        Dist0 = np.sqrt((posx[0] - posx)**2 + (posy[0] - posy)**2) #regular  
+        Dist1 = np.sqrt((posx[0]  - L - posx)**2 + (posy[0] - posy + L)**2) #topleft
+        Dist2 = np.sqrt((posx[0]  - posx)**2 + (posy[0] - posy + L)**2) #topcenter
+        Dist3 = np.sqrt((posx[0]  + L - posx)**2 + (posy[0] - posy + L)**2) #topright
+        Dist4 = np.sqrt((posx[0]  - L - posx)**2 + (posy[0] - posy)**2) #middleleft
+        Dist5 = np.sqrt((posx[0]  + L - posx)**2 + (posy[0] - posy)**2) #middleright
+        Dist6 = np.sqrt((posx[0]  - L - posx)**2 + (posy[0] - posy - L)**2) #bottomleft
+        Dist7 = np.sqrt((posx[0]  - posx)**2 + (posy[0] - posy - L)**2) #bottomcenter
+        Dist8 = np.sqrt((posx[0]  + L - posx)**2 + (posy[0] - posy - L)**2) #bottomright
+
+        for k in prange(len(Dist0)):
+                Dists[k] = min(Dist0[k],Dist1[k],Dist2[k],
+                     Dist3[k],Dist4[k],Dist5[k],
+                     Dist6[k],Dist7[k],Dist8[k])
+        return(Dists)
 ```
 
 ```{python}
@@ -168,11 +192,12 @@ TotalTime = 300 #Total non-dimensional time
 simTime = int(TotalTime/dt) #Number of timesteps in order to achieve total Time 
 loops = 10 #Number of simulations
 
+binsize=500
 Turn = 1
 Means = np.linspace(.75,np.pi-.75,15,dtype=float)
+Times = [int(15*dt)-1,int(75*dt)-1,int(150*dt)-1,int(225*dt)-1,int(300*dt)-1]
 
-TotalGradC = np.zeros((len(Means),loops,simTime))
-TotChemC = np.zeros((len(Means),loops,simTime))
+BinsC = np.zeros((len(Means),binsize,len(Times)))
 
 j = 0 #Constant Deposition Function
 
@@ -220,10 +245,7 @@ for m in range(len(Means)):
         POS = np.zeros((2,numb,2))
         CHEM[1,:,:] = scalar_store[0] #preallocate the chemical 
         POS[1,:,:] = pos_store[0] #preallocate the plankton
-        
-        TotalGradC[m,Job,0] = np.sum(np.absolute(np.gradient(CHEM[1],LL/meshsize)))*(LL/meshsize)**2
-        TotChemC[m,Job,0] = np.sum(CHEM[1].flatten())*(LL/meshsize)**2
-
+    
         boundaryCutoff = 64*SM.depVar
         intDelta = int((SM.N - 1)*8*np.sqrt(SM.depVar)/SM.L+0.5)
         Std = SM.depVar
@@ -231,7 +253,8 @@ for m in range(len(Means)):
         PlankDensity = SM.density*SM.L**2/SM.num
 
         LU = sla.splu(SM.M1.tocsc())
-
+        
+        cc = 0
         for k in range(1,simTime):
             SM.BuildPeriodic()
             c = scalarInterp(SM.x_periodic,SM.y_periodic,SM.scalar_periodic,pos)
@@ -251,10 +274,17 @@ for m in range(len(Means)):
             POS[0,:,:] = POS[1]
             POS[1,:,:] = pos
             
-            TotChemC[m,Job,k] = np.sum(CHEM[1].flatten())*(LL/meshsize)**2
-            
-            A, B = np.gradient(CHEM[1],LL/meshsize)
-            TotalGradC[m,Job,k] = np.sum(np.sqrt(A**2 + B**2))*(LL/meshsize)**2
+            if (k in Times):
+                for j in range(SM.N):
+                    Dists = np.delete(Calc_Dist(POS[1,j:,j:],LL),0,0)
+                    FN = np.histogram(Dists,bins=binsize,range=(0.00001,LL),density=False)
+                    BinsC[m,:,cc] += FN[0]
+                cc += 1
+                
+    NN = SM.N
+    Area = 2*NN*pi/(LL**2)
+    for i in range(len(Times)):
+        BinsC[m,:,i] = np.divide(BinsC[m,:,i],loops*(FN[1][1]-FN[1][0])*Area*(FN[1][1:]+FN[1][:-1])/2*(NN - 1)/2)
 ```
 
 ```{python}
@@ -268,11 +298,11 @@ loops = 10 #Number of simulations
 
 Turn = 1
 Means = np.linspace(.75,np.pi-.75,15,dtype=float)
+Times = [int(15*dt)-1,int(75*dt)-1,int(150*dt)-1,int(225*dt)-1,int(300*dt)-1]
 
-TotalGradA = np.zeros((len(Means),loops,simTime))
-TotChemA = np.zeros((len(Means),loops,simTime))
+BinsA = np.zeros((len(Means),binsize,len(Times)))
 
-j = 1 #Constant Deposition Function
+j = 1 #Switch Deposition Function
 
 for m in range(len(Means)):
     
@@ -318,10 +348,7 @@ for m in range(len(Means)):
         POS = np.zeros((2,numb,2))
         CHEM[1,:,:] = scalar_store[0] #preallocate the chemical 
         POS[1,:,:] = pos_store[0] #preallocate the plankton
-        
-        TotalGradA[m,Job,0] = np.sum(np.absolute(np.gradient(CHEM[1],LL/meshsize)))*(LL/meshsize)**2
-        TotChemA[m,Job,0] = np.sum(CHEM[1].flatten())*(LL/meshsize)**2
-
+    
         boundaryCutoff = 64*SM.depVar
         intDelta = int((SM.N - 1)*8*np.sqrt(SM.depVar)/SM.L+0.5)
         Std = SM.depVar
@@ -329,7 +356,8 @@ for m in range(len(Means)):
         PlankDensity = SM.density*SM.L**2/SM.num
 
         LU = sla.splu(SM.M1.tocsc())
-
+        
+        cc = 0
         for k in range(1,simTime):
             SM.BuildPeriodic()
             c = scalarInterp(SM.x_periodic,SM.y_periodic,SM.scalar_periodic,pos)
@@ -349,10 +377,17 @@ for m in range(len(Means)):
             POS[0,:,:] = POS[1]
             POS[1,:,:] = pos
             
-            TotChemA[m,Job,k] = np.sum(CHEM[1].flatten())*(LL/meshsize)**2
-            
-            A, B = np.gradient(CHEM[1],LL/meshsize)
-            TotalGradA[m,Job,k] = np.sum(np.sqrt(A**2 + B**2))*(LL/meshsize)**2
+            if (k in Times):
+                for j in range(SM.N):
+                    Dists = np.delete(Calc_Dist(POS[1,j:,j:],LL),0,0)
+                    FN = np.histogram(Dists,bins=binsize,range=(0.00001,LL),density=False)
+                    BinsA[m,:,cc] += FN[0]
+                cc += 1
+                
+    NN = SM.N
+    Area = 2*NN*pi/(LL**2)
+    for i in range(len(Times)):
+        BinsA[m,:,i] = np.divide(BinsA[m,:,i],loops*(FN[1][1]-FN[1][0])*Area*(FN[1][1:]+FN[1][:-1])/2*(NN - 1)/2)
 ```
 
 ```{python}
@@ -366,11 +401,11 @@ loops = 10 #Number of simulations
 
 Turn = 1
 Means = np.linspace(.75,np.pi-.75,15,dtype=float)
+Times = [int(15*dt)-1,int(75*dt)-1,int(150*dt)-1,int(225*dt)-1,int(300*dt)-1]
 
-TotalGradL = np.zeros((len(Means),loops,simTime))
-TotChemL = np.zeros((len(Means),loops,simTime))
+BinsL = np.zeros((len(Means),binsize,len(Times)))
 
-j = 2 #Constant Deposition Function
+j = 2 #Linear Switch Deposition Function
 
 for m in range(len(Means)):
     
@@ -416,10 +451,7 @@ for m in range(len(Means)):
         POS = np.zeros((2,numb,2))
         CHEM[1,:,:] = scalar_store[0] #preallocate the chemical 
         POS[1,:,:] = pos_store[0] #preallocate the plankton
-        
-        TotalGradL[m,Job,0] = np.sum(np.absolute(np.gradient(CHEM[1],LL/meshsize)))*(LL/meshsize)**2
-        TotChemL[m,Job,0] = np.sum(CHEM[1].flatten())*(LL/meshsize)**2
-
+    
         boundaryCutoff = 64*SM.depVar
         intDelta = int((SM.N - 1)*8*np.sqrt(SM.depVar)/SM.L+0.5)
         Std = SM.depVar
@@ -427,7 +459,8 @@ for m in range(len(Means)):
         PlankDensity = SM.density*SM.L**2/SM.num
 
         LU = sla.splu(SM.M1.tocsc())
-
+        
+        cc = 0
         for k in range(1,simTime):
             SM.BuildPeriodic()
             c = scalarInterp(SM.x_periodic,SM.y_periodic,SM.scalar_periodic,pos)
@@ -447,353 +480,253 @@ for m in range(len(Means)):
             POS[0,:,:] = POS[1]
             POS[1,:,:] = pos
             
-            TotChemL[m,Job,k] = np.sum(CHEM[1].flatten())*(LL/meshsize)**2
-            
-            A, B = np.gradient(CHEM[1],LL/meshsize)
-            TotalGradL[m,Job,k] = np.sum(np.sqrt(A**2 + B**2))*(LL/meshsize)**2
+            if (k in Times):
+                for j in range(SM.N):
+                    Dists = np.delete(Calc_Dist(POS[1,j:,j:],LL),0,0)
+                    FN = np.histogram(Dists,bins=binsize,range=(0.00001,LL),density=False)
+                    BinsL[m,:,cc] += FN[0]
+                cc += 1
+                
+    NN = SM.N
+    Area = 2*NN*pi/(LL**2)
+    for i in range(len(Times)):
+        BinsL[m,:,i] = np.divide(BinsL[m,:,i],loops*(FN[1][1]-FN[1][0])*Area*(FN[1][1:]+FN[1][:-1])/2*(NN - 1)/2)
 ```
 
-## Fig. 5.5a-c - Total Variation in the system for all deposition functions with varied turning kernel means
+## Fig. 5.7a-c - RDF Plots for Each Deposition Function with varied turning kernel mean
 
 ```{python}
-fig, ax = plt.subplots(figsize=(7,5),tight_layout=True)
+GR = (1 + np.sqrt(5))/2
+fig, axs = plt.subplots(figsize = (45,8),nrows = 1, ncols = 5, sharey = 'row', sharex = 'row')
+fig.subplots_adjust(hspace=0.4, wspace=0.13)
 
 colors = ['#648FFF','#785EF0','#DC267F','#FE6100','#FFB000'] #Using IBM Colorblind Scheme 
-markers = ['D','o','s','']
+markers = ['D','o','s','*']
 linestyles=['-','--',':']
+params = {'legend.fontsize': 15,'legend.framealpha':1}
+plt.rcParams.update(params)
 
-Means2 = [5,7,9,11,13]
+Times = [15,75,150,225,300]
 
-for j in range(len(Means2)):
-    M = Means2[j]
-    SumVar = np.mean(TotalGradC[M,:,:],axis=0)
-    Std = np.std(TotalGradC[M,:,:],axis=0)
+Vals = [5,7,9,11,13]
+
+for i in range(len(Times)):
     
-    times = np.linspace(0,300,len(Std))
-    
-    ax.fill_between(times,SumVar-Std,SumVar-Std,color=colors[j],alpha=.3)
-    
-    ax.plot(times,SumVar,color=colors[np.mod(j,5)],linestyle = linestyles[np.mod(j,3)],
-            marker = markers[np.mod(j,4)],markevery=int(300/0.1),linewidth=2.8,
-            label=r'$\mu = {0}$'.format(round(Means[j],3)))
-    
-ax.set_xlabel(r'Time, $t$',fontsize=20)
-ax.set_ylabel(r'$V(t)$',fontsize=20)
-ax.set_title('Total Variation, $f_1$',fontsize=20)
-ax.tick_params(labelsize=18)
-ax.set_xlim(0,300)
-ax.legend(fontsize=16)
-
-plt.savefig('./Figures/Fig5_5a.png')
-```
-
-```{python}
-fig, ax = plt.subplots(figsize=(7,5),tight_layout=True)
-
-colors = ['#648FFF','#785EF0','#DC267F','#FE6100','#FFB000'] #Using IBM Colorblind Scheme 
-markers = ['D','o','s','']
-linestyles=['-','--',':']
-
-Means2 = [5,7,9,11,13]
-
-for j in range(len(Means2)):
-    M = Means2[j]
-    SumVar = np.mean(TotalGradA[M,:,:],axis=0)
-    Std = np.std(TotalGradA[M,:,:],axis=0)
-    
-    times = np.linspace(0,300,len(Std))
-    
-    ax.fill_between(times,SumVar-Std,SumVar-Std,color=colors[j],alpha=.3)
-    
-    ax.plot(times,SumVar,color=colors[np.mod(j,5)],linestyle = linestyles[np.mod(j,3)],
-            marker = markers[np.mod(j,4)],markevery=int(300/0.1),linewidth=2.8,
-            label=r'$\mu = {0}$'.format(round(Means[j],3)))
-    
-ax.set_xlabel(r'Time, $t$',fontsize=20)
-ax.set_ylabel(r'$V(t)$',fontsize=20)
-ax.set_title('Total Variation, $f_2$',fontsize=20)
-ax.tick_params(labelsize=18)
-ax.set_xlim(0,300)
-ax.legend(fontsize=16)
-
-plt.savefig('./Figures/Fig5_5b.png')
-```
-
-```{python}
-fig, ax = plt.subplots(figsize=(7,5),tight_layout=True)
-
-colors = ['#648FFF','#785EF0','#DC267F','#FE6100','#FFB000'] #Using IBM Colorblind Scheme 
-markers = ['D','o','s','']
-linestyles=['-','--',':']
-
-Means2 = [5,7,9,11,13]
-
-for j in range(len(Means2)):
-    M = Means2[j]
-    SumVar = np.mean(TotalGradL[M,:,:],axis=0)
-    Std = np.std(TotalGradL[M,:,:],axis=0)
-    
-    times = np.linspace(0,300,len(Std))
-    
-    ax.fill_between(times,SumVar-Std,SumVar-Std,color=colors[j],alpha=.3)
-    
-    ax.plot(times,SumVar,color=colors[np.mod(j,5)],linestyle = linestyles[np.mod(j,3)],
-            marker = markers[np.mod(j,4)],markevery=int(300/0.1),linewidth=2.8,
-            label=r'$\mu = {0}$'.format(round(Means[j],3)))
-    
-ax.set_xlabel(r'Time, $t$',fontsize=20)
-ax.set_ylabel(r'$V(t)$',fontsize=20)
-ax.set_title('Total Variation, $f_3$',fontsize=20)
-ax.tick_params(labelsize=18)
-ax.set_xlim(0,300)
-ax.legend(fontsize=16)
-
-plt.savefig('./Figures/Fig5_5c.png')
-```
-
-## Fig. 5.5d - Total Variation at $t = 300$ for varied turning kernel mean and deposition function
-
-```{python}
-fig, ax = plt.subplots(figsize=(7,5),tight_layout=True)
-
-colors = ['#000000','#009E73','#D55E00'] 
-lins = ['--','-',':']
-
-Deps = ['C','A','L']
-for j in range(len(Deps)):
-    
-    SumChem = np.mean(TotChem[j,:,:],axis=0)
-    Std = np.std(TotChem[j,:,:],axis=0)
-    
-    
-    times = np.linspace(0,300,Std)
-    
-    ax.fill_between(times,SumChem-Std,SumChem-Std,color=colors[j],alpha=.3)
-    
-    ax.plot(times,SumChem,color=colors[j],linestyle = lins[j],linewidth=2.8,label=r'$f_{0}(c)$'.format(j+1))
-
-ax.set_xlabel(r'Time, $t$',fontsize=20)
-ax.set_ylabel(r'$C(t)$',fontsize=20)
-ax.set_title('Total Chemical',fontsize=20)
-
-ax.tick_params(labelsize=18)
-
-ax.set_xlim(0,300)
-ax.legend(fontsize=16)
-
-plt.savefig('./Figures/Fig4_8a.png')
-```
-
-```{python}
-fig, ax = plt.subplots(figsize=(7,5),tight_layout=True)
-
-VarC = []
-VarA = []
-VarL = []
-for j in range(4,len(Means)):
-    SumVarC = np.mean(TotalGradC[j,:,:],axis=0)
-    SumVarA = np.mean(TotalGradA[j,:,:],axis=0)
-    SumVarL = np.mean(TotalGradL[j,:,:],axis=0)
-    
-    VarC = np.append(VarC,SumVarC[-1])
-    VarA = np.append(VarA,SumVarA[-1])
-    VarL = np.append(VarL,SumVarL[-1])
-
-fig, ax = plt.subplots(figsize=(7,5),tight_layout=True)
-colors = ['#000000','#009E73','#D55E00'] 
-
-ax.plot(Means[4:], Vals,color=colors[0],marker='o',linestyle='',label='$f_1(c)$',markersize=8)
-ax.plot(Means[4:], Vals2,color=colors[1],marker='^',linestyle='',label='$f_2(c)$',markersize=8)
-ax.plot(Means[4:], Vals3,color=colors[2],marker='s',linestyle='',label='$f_3(c)$',markersize=8)
-
-ax.set_xlabel(r'Mean of $P_1$, $\mu$',fontsize=20)
-ax.set_ylabel(r'$V(t = 300)$',fontsize=20)
-ax.set_title('Total Variation at $t = 300$ vs. Mean of $P_1$',fontsize=20)
-ax.tick_params(labelsize=18)
-ax.legend(fontsize=20,loc=0)
-
-plt.savefig('./Figures/Fig5_5d.png')
-```
-
-## Fig. 5.5e - Total Variation in the system for $f_1$ and a turning kernel with a singular angle
-
-```{python}
-meshsize = 400  #Chemical Mesh size
-numb = 160000  #Number of plankton in simulation
-LL = 10 #Length of domain [0,L] x [0,L]
-dt = 0.01 #Time-stepping size
-TotalTime = 300 #Total non-dimensional time 
-simTime = int(TotalTime/dt) #Number of timesteps in order to achieve total Time 
-loops = 10 #Number of simulations
-
-Turn = 4
-Means = np.linspace(0,np.pi,15,dtype=float)
-
-TotalGradS = np.zeros((len(Means),loops,simTime))
-
-j = 0 #Constant Deposition Function
-
-for m in range(len(Means)):
-    
-    tvv = np.array([Means[m]])
-
-    for Job in range(loops):
-
-        if (j == 0):
-            SM = PS.Plankton(DP.constantDep,d1=.1,d2=4,N = meshsize,depMaxStr=.01,
-                        Const=3,L=LL,k=dt,delta=1e-3,depThreshold=0.012, 
-                    depTransWidth=0.008, num = numb, c0=0.01)
-        if (j == 1):
-            SM = PS.Plankton(DP.atanDep,d1=.1,d2=4,N = meshsize,depMaxStr=.01,
-                       Const=3,L=LL,k=dt,delta=1e-3,depThreshold=0.012, 
-                      depTransWidth=0.0007, num = numb, c0=0.01)
-
-        if (j == 2):
-            SM = PS.Plankton(DP.linAtanDep,d1=.1,d2=4,N = meshsize,depMaxStr=.01,
-                       Const=3,L=LL,k=dt,delta=1e-3,depThreshold=0.012, 
-                       depTransWidth=0.008, num = numb, c0=0.01)
-
-        SM.SetIC(initial_conditions)
-
-        lenn = int(np.sqrt(numb))
-        pos = np.zeros((1,2))
-        vel = np.zeros((1,2))
-
-        #Place plankton down uniformly throughout the domain and give each a direction to travel initially
-        for l in range(0,lenn):
-            for k in range(0,lenn):
-                pos = np.append(pos,[np.array([np.mod(k*(SM.L*1/(lenn)) + 0.5*(SM.L*1/(lenn)),SM.L),
-                        np.mod(l*(SM.L*1/(lenn)) + 0.5*(SM.L*1/(lenn)),SM.L)])],axis=0)
-                th  = rand()*2*pi
-                vel = np.append(vel,[np.array([np.cos(th),np.sin(th)])],axis=0)
-
-        pos = np.delete(pos,0,0)
-        vel = np.delete(vel,0,0)
-        pos_store = list([pos[:,:]])
-        pos_store = list([np.array(pos)])
-        scalar_store = list([SM.Meshed()])
-
-        CHEM = np.zeros((2,meshsize,meshsize))
-        POS = np.zeros((2,numb,2))
-        CHEM[1,:,:] = scalar_store[0] #preallocate the chemical 
-        POS[1,:,:] = pos_store[0] #preallocate the plankton
+    for j in range(len(Vals)):
         
-        TotalGradS[m,Job,0] = np.sum(np.absolute(np.gradient(CHEM[1],LL/meshsize)))*(LL/meshsize)**2
+        A = BinsC[Vals[j],:,i]
+        AN = A[:int(len(A)/2)]
+        Lengs = np.linspace(0,5,len(AN))
+        axs[i].plot(Lengs,AN,color=colors[np.mod(j,5)],linestyle = linestyles[np.mod(j,2)],linewidth=3.5,
+           label=r'$\mu = {0}$'.format(np.round(Means[Vals[j]],2)),marker=markers[np.mod(j,4)],markevery=50,
+                    markersize=12)
+        
+    axs[i].set_title(r'$t = {0}$'.format(Times[i]),fontsize=40,pad=1)
 
-        boundaryCutoff = 64*SM.depVar
-        intDelta = int((SM.N - 1)*8*np.sqrt(SM.depVar)/SM.L+0.5)
-        Std = SM.depVar
-        meshsize = SM.N
-        PlankDensity = SM.density*SM.L**2/SM.num
+    axs[i].axhline(1,linestyle='--',linewidth=3,color='k',alpha=.5)
+    axs[i].legend(fontsize=23,loc=0)
+    axs[i].tick_params(which='both',labelsize=25,direction='in',length=13)
+    axs[i].locator_params(nbins=5,axis='x')
+    axs[i].locator_params(nbins=4,axis='y')
+    axs[0].set_ylabel(r'$g(r)$ for $f_1(c)$',fontsize=40)
+    axs[i].set_xlabel(r'$r$',fontsize=40)
+    axs[i].set_xlim(0,5)
+    axs[i].set_ylim(0.8,2.4)
 
-        LU = sla.splu(SM.M1.tocsc())
 
-        for k in range(1,simTime):
-            SM.BuildPeriodic()
-            c = scalarInterp(SM.x_periodic,SM.y_periodic,SM.scalar_periodic,pos)
-            SM.BuildPeriodic()
-            grad_c = scalarGrad(SM.L,SM.x_periodic,SM.y_periodic,SM.scalar_periodic,pos)
-
-            pos,vel = RTTK(SM.k,SM.delta,SM.L,pos,vel,c,grad_c,Turn,tvv)
-
-            depStr = SM.depFcn(c,SM.depMaxStr,SM.depThreshold,SM.depTransWidth)
-
-            f = Update(SM.N,SM.L,SM.k,Std,SM.num,depStr,pos,SM.xm,SM.ym,intDelta,meshsize,boundaryCutoff)
-
-            SM.scalar = LU.solve(SM.M2.dot(SM.scalar)+SM.k*(PlankDensity)*f)
-
-            CHEM[0,:,:] = CHEM[1]
-            CHEM[1,:,:] = SM.Meshed()
-            POS[0,:,:] = POS[1]
-            POS[1,:,:] = pos
-                    
-            A, B = np.gradient(CHEM[1],LL/meshsize)
-            TotalGradS[m,Job,k] = np.sum(np.sqrt(A**2 + B**2))*(LL/meshsize)**2
+plt.savefig('./Figures/Fig5_7a.png')
 ```
 
 ```{python}
-fig, ax = plt.subplots(figsize=(7,5),tight_layout=True)
+GR = (1 + np.sqrt(5))/2
+fig, axs = plt.subplots(figsize = (45,8),nrows = 1, ncols = 5, sharey = 'row', sharex = 'row')
 
+fig.subplots_adjust(hspace=0.4, wspace=0.13)
 colors = ['#648FFF','#785EF0','#DC267F','#FE6100','#FFB000'] #Using IBM Colorblind Scheme 
-markers = ['D','o','s','']
+markers = ['D','o','s','*']
 linestyles=['-','--',':']
+params = {'legend.fontsize': 15,'legend.framealpha':1}
+plt.rcParams.update(params)
 
-Means2 = [4,6,8,10,12,14]
+Times = [15,75,150,225,300]
 
-for j in range(len(Means2)):
-    M = Means2[j]
-    SumVar = np.mean(TotalGradS[M,:,:],axis=0)
-    Std = np.std(TotalGradS[M,:,:],axis=0)
-    
-    times = np.linspace(0,300,len(Std))
-    
-    ax.fill_between(times,SumVar-Std,SumVar-Std,color=colors[j],alpha=.3)
-    
-    ax.plot(times,SumVar,color=colors[np.mod(j,5)],linestyle = linestyles[np.mod(j,3)],
-            marker = markers[np.mod(j,4)],markevery=int(300/0.1),linewidth=2.8,
-            label=r'$\mu = {0}$'.format(round(Means[j],3)))
-    
-ax.set_xlabel(r'Time, $t$',fontsize=20)
-ax.set_ylabel(r'$V(t)$',fontsize=20)
-ax.set_title('Total Variation, Single Angle',fontsize=20)
-ax.tick_params(labelsize=18)
-ax.set_xlim(0,300)
-ax.legend(fontsize=16)
+Vals = [5,7,9,11,13]
 
-plt.savefig('./Figures/Fig5_5e.png')
+for i in range(len(Times)):
+    
+    for j in range(len(Vals)):
+        
+        A = BinsA[Vals[j],:,i]
+        AN = A[:int(len(A)/2)]
+        Lengs = np.linspace(0,5,len(AN))
+        axs[i].plot(Lengs,AN,color=colors[np.mod(j,5)],linestyle = linestyles[np.mod(j,2)],linewidth=3.5,
+           label=r'$\mu = {0}$'.format(np.round(Means[Vals[j]],2)),marker=markers[np.mod(j,4)],markevery=50,
+                    markersize=12)
+        
+    axs[i].set_title(r'$t = {0}$'.format(Times[i]),fontsize=40,pad=1)
+
+    axs[i].axhline(1,linestyle='--',linewidth=3,color='k',alpha=.5)
+    axs[i].legend(fontsize=23,loc=0)
+    axs[i].tick_params(which='both',labelsize=25,direction='in',length=13)
+    axs[i].locator_params(nbins=5,axis='x')
+    axs[i].locator_params(nbins=4,axis='y')
+    axs[0].set_ylabel(r'$g(r)$ for $f_2(c)$',fontsize=40)
+    axs[i].set_xlabel(r'$r$',fontsize=40)
+    axs[i].set_xlim(0,5)
+    axs[i].set_ylim(0.8,1.22)
+
+
+plt.savefig('./Figures/Fig5_7b.png')
 ```
+
+```{python}
+GR = (1 + np.sqrt(5))/2
+fig, axs = plt.subplots(figsize = (45,8),nrows = 1, ncols = 5, sharey = 'row', sharex = 'row')
+
+fig.subplots_adjust(hspace=0.4, wspace=0.13)
+colors = ['#648FFF','#785EF0','#DC267F','#FE6100','#FFB000'] #Using IBM Colorblind Scheme 
+markers = ['D','o','s','*']
+linestyles=['-','--',':']
+params = {'legend.fontsize': 15,'legend.framealpha':1}
+plt.rcParams.update(params)
+
+Times = [15,75,150,225,300]
+
+Vals = [5,7,9,11,13]
+
+for i in range(len(Times)):
+    
+    for j in range(len(Vals)):
+        
+        A = BinsL[Vals[j],:,i]
+        AN = A[:int(len(A)/2)]
+        Lengs = np.linspace(0,5,len(AN))
+        axs[i].plot(Lengs,AN,color=colors[np.mod(j,5)],linestyle = linestyles[np.mod(j,2)],linewidth=3.5,
+           label=r'$\mu = {0}$'.format(np.round(Means[Vals[j]],2)),marker=markers[np.mod(j,4)],markevery=50,
+                    markersize=12)
+        
+    axs[i].set_title(r'$t = {0}$'.format(Times[i]),fontsize=40,pad=1)
+
+    axs[i].axhline(1,linestyle='--',linewidth=3,color='k',alpha=.5)
+    axs[i].legend(fontsize=23,loc=0)
+    axs[i].tick_params(which='both',labelsize=25,direction='in',length=13)
+    axs[i].locator_params(nbins=5,axis='x')
+    axs[i].locator_params(nbins=4,axis='y')
+    axs[0].set_ylabel(r'$g(r)$ for $f_3(c)$',fontsize=40)
+    axs[i].set_xlabel(r'$r$',fontsize=40)
+    axs[i].set_xlim(0,5)
+    axs[i].set_ylim(0.8,2.1)
+
+
+plt.savefig('./Figures/Fig5_7c.png')
+```
+
+## Fig 5.8 - Specific metrics regarding the radial distribution function $g(r)$ at time $t = 300$
+
+```{python}
+Vals = [4,5,6,7,8,9,10,11,12,13,14]
+
+R0C = []
+R0A = []
+R0L = []
+
+DerC = []
+DerA = []
+DerL = []
+
+AggC = []
+AggA = []
+AggL = []
+
+for j in range(len(Vals)):
+    
+    #take RDF at t = 300
+    AC = BinsC[Vals[j],:,-1]
+    AA = BinsA[Vals[j],:,-1]
+    AL = BinsL[Vals[j],:,-1]
+
+    ANC = AC[:int(len(AC)/2)]
+    ANA = AA[:int(len(AA)/2)]
+    ANL = AL[:int(len(AL)/2)]
+    
+    LL = np.linspace(0,5,len(ANC))
+
+    #Value at r = 0
+    R0C = np.append(R0C,ANC[0])
+    R0A = np.append(R0A,ANA[0])
+    R0L = np.append(R0L,ANL[0])
+
+    #Value of g(r) largest derivative
+    GFC = np.diff(ANC)/(LL[3]-LL[2])
+    DerC = np.append(DerC,min(GFC))
+    GFA = np.diff(ANA)/(LL[3]-LL[2])
+    DerA = np.append(DerA,min(GFA))
+    GFL = np.diff(ANL)/(LL[3]-LL[2])
+    DerL = np.append(DerL,min(GFL))
+    
+    #Size of the aggregation
+    AggC = np.append(AggC,LL[np.where(ANC < 1)[0][0]])
+    AggA = np.append(AggA,LL[np.where(ANA < 1)[0][0]])
+    AggL = np.append(AggL,LL[np.where(ANL < 1)[0][0]])
+
+```
+
+## Fig 5.8a - Value of $g(0)$ at $t = 300$ for varied turning kernel means and deposition functions
 
 ```{python}
 fig, ax = plt.subplots(figsize=(7,5),tight_layout=True)
 colors = ['#000000','#009E73','#D55E00'] 
 
-VarS = []
-for j in range(len(Means)):
-    SumVarS = np.mean(TotalGradS[j,:,:],axis=0)
-    VarS = np.append(VarS,SumVarS[-1])
-
-ax.plot(Means,Vals,color=colors[0],marker='o',linestyle='',markersize=8)
+ax.plot(Means[4:], R0C,color=colors[0],marker='o',linestyle='',label='$f_1(c)$',markersize=8)
+ax.plot(Means[4:], R0A,color=colors[1],marker='^',linestyle='',label='$f_2(c)$',markersize=8)
+ax.plot(Means[4:], R0L,color=colors[2],marker='s',linestyle='',label='$f_3(c)$',markersize=8)
 
 ax.set_xlabel(r'Mean of $P_1$, $\mu$',fontsize=20)
-ax.set_ylabel(r'$V(t = 300)$',fontsize=20)
-ax.set_title('Total Variation at $t = 300$, Single Angle',fontsize=20)
+ax.set_ylabel(r'$g(0)$',fontsize=20)
+ax.set_title('Value of RDF at $r = 0$ vs. Mean of $P_1$',fontsize=20)
 ax.tick_params(labelsize=18)
-ax.set_xlim(-.1,np.pi+.1)
-ax.set_xticks([0,np.pi/4,np.pi/2,3*np.pi/4,np.pi])
-ax.set_xticklabels([r'$0$',r'$\pi/4$',r'$\pi/2$',r'$3\pi/4$',r'$\pi$'])
-
-plt.savefig('./Figures/Fig5_5f.png')
-```
-
-## Fig. 5.6 - Total Chemcial in the system at $t = 300$ for varied turning kernel means and deposition functions
-
-```{python}
-fig, ax = plt.subplots(figsize=(7,5),tight_layout=True)
-colors = ['#000000','#009E73','#D55E00'] 
-
-ChemC = []
-ChemA = []
-ChemL = []
-for j in range(4,len(Means)):
-    SumChemC = np.mean(TotChemC[j,:,:],axis=0)
-    SumChemA = np.mean(TotChemA[j,:,:],axis=0)
-    SumChemL = np.mean(TotChemL[j,:,:],axis=0)
-    
-    ChemC = np.append(ChemC,SumChemC[-1])
-    ChemA = np.append(ChemA,SumChemA[-1])
-    ChemL = np.append(ChemL,SumChemL[-1])
-
-ax.plot(Means[4:], Vals,color=colors[0],marker='o',linestyle='',label='$f_1(c)$',markersize=8)
-ax.plot(Means[4:], Vals2,color=colors[1],marker='^',linestyle='',label='$f_2(c)$',markersize=8)
-ax.plot(Means[4:], Vals3,color=colors[2],marker='s',linestyle='',label='$f_3(c)$',markersize=8)
-
-ax.set_xlabel(r'Mean of $P_1$, $\mu$',fontsize=20)
-ax.set_ylabel(r'$C(t = 300)$',fontsize=20)
-ax.set_title('Total Chemical at $t = 300$ vs. Mean of $P_1$',fontsize=20)
-ax.tick_params(labelsize=18)
-ax.locator_params(nbins=4,axis='y')
 
 ax.legend(fontsize=20,loc=0)
 
-plt.savefig('./Figures/Fig5_6.png')
+plt.savefig('./Figures/Fig5_8a.png')
+```
+
+## Fig 5.8b - Value of $\min(g^{\prime}(r))$ at $t = 300$ for varied turning kernel means and deposition functions
+
+```{python}
+fig, ax = plt.subplots(figsize=(7,5),tight_layout=True)
+colors = ['#000000','#009E73','#D55E00'] 
+
+ax.plot(Means[4:],DerC,color=colors[0],marker='o',linestyle='',label='$f_1(c)$',markersize=8)
+ax.plot(Means[4:],DerA,color=colors[1],marker='^',linestyle='',label='$f_2(c)$',markersize=8)
+ax.plot(Means[4:],DerL,color=colors[2],marker='s',linestyle='',label='$f_3(c)$',markersize=8)
+
+ax.set_xlabel(r'Mean of $P_1$, $\mu$',fontsize=20)
+ax.set_ylabel(r'$\min(g^{\prime}(r))$',fontsize=20)
+ax.set_title('Value of $\min(g^{\prime}(r))$ vs. Mean of $P_1$',fontsize=20)
+ax.tick_params(labelsize=18)
+
+ax.legend(fontsize=20,loc=0)
+
+plt.savefig('./Figures/Fig5_8b.png')
+```
+
+## Fig 5.8c - Size of the average aggregation at $t = 300$ for varied turning kernel means and deposition functions, $G(t = 300)$
+
+```{python}
+fig, ax = plt.subplots(figsize=(7,5),tight_layout=True)
+colors = ['#000000','#009E73','#D55E00'] 
+
+ax.plot(Means[4:],AggC,color=colors[0],marker='o',linestyle='',label='$f_1(c)$',markersize=8)
+ax.plot(Means[4:],AggA,color=colors[1],marker='^',linestyle='',label='$f_2(c)$',markersize=8)
+ax.plot(Means[4:],AggL,color=colors[2],marker='s',linestyle='',label='$f_3(c)$',markersize=8)
+
+ax.set_xlabel(r'Mean of $P_1$, $\mu$',fontsize=20)
+ax.set_ylabel(r'Size of Agg. at $t = 300$',fontsize=20)
+ax.set_title('Size of Agg. at $t = 300$ vs. Mean of $P_1$',fontsize=18)
+ax.tick_params(labelsize=18)
+
+ax.legend(fontsize=20,loc=0)
+
+plt.savefig('./Figures/Fig5_8c.png')
 ```

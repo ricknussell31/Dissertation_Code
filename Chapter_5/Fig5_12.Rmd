@@ -1,0 +1,506 @@
+---
+jupyter:
+  jupytext:
+    text_representation:
+      extension: .Rmd
+      format_name: rmarkdown
+      format_version: '1.2'
+      jupytext_version: 1.4.2
+  kernelspec:
+    display_name: Python 3
+    language: python
+    name: python3
+---
+
+```{python}
+from scipy import *
+import numpy as np
+import matplotlib.pyplot as plt
+import PlanktonSignaling.basics as PS
+import PlanktonSignaling.Deposition as DP
+
+import scipy.sparse as sp
+from scipy.interpolate import RectBivariateSpline,griddata
+from scipy.sparse.linalg import spsolve
+from scipy.linalg import solve
+from scipy.sparse import linalg as sla
+from scipy import sparse
+from numba import int32, float32, float64, int64, njit, prange
+from numpy import exp
+from numba import prange
+from numpy.random import rand, uniform, triangular, choice, vonmises
+
+# %matplotlib notebook
+```
+
+```{python}
+def initial_conditions(x,y):
+    return(0*x + 0.01)
+
+def scalarInterp(x_periodic,y_periodic,scalar_periodic,pos):
+    bspline = RectBivariateSpline(x_periodic,y_periodic,scalar_periodic)
+    return(bspline.ev(pos[:,1],pos[:,0]))
+
+
+
+def scalarGrad(L,x_periodic,y_periodic,scalar_periodic,xp,dx=1.0e-4):
+    dx = dx*L
+    bspline = RectBivariateSpline(x_periodic,y_periodic,scalar_periodic)
+    p = np.array([np.mod(xp + np.array([dx,0]),L),np.mod(xp - np.array([dx,0]),L),np.mod(xp + np.array([0,dx]),L),
+                                  np.mod(xp - np.array([0,dx]),L)])
+
+    dp = bspline.ev(p[:,:,1],p[:,:,0])
+
+    diffs = np.array([dp[0]-dp[1],dp[2]-dp[3]])/2/dx
+    diffs = diffs.T
+    return(diffs)
+
+@njit
+def RTTK(k,delta,L,pos,vel,c,grad_c,Turn,tvv):
+    for j in range(len(pos)):
+        Dot = np.dot(vel[j].T,grad_c[j])
+        alpha = 1/np.sqrt(delta**2 + Dot**2)
+        if (rand() < k*0.5*(1- alpha*Dot)):
+            th = np.arctan2(vel[j,1],vel[j,0])
+            
+            if (Turn == 0): #Uniform Dist. [0,2pi]
+                th += rand()*2*np.pi
+            elif (Turn == 1): #Uniform Dist. [a,b]
+                Flip = np.random.choice(np.array([-1,1]))
+                th += Flip*np.random.uniform(tvv[0],tvv[1])
+            elif (Turn == 2 or Turn == 3): #Triangular Dist. 
+                th += choice(np.array([-1,1]))*triangular(tvv[0],tvv[1],tvv[2])
+            elif (Turn == 4):
+                th += choice(np.array([-1,1]))*vonmises(tvv[0],tvv[1])
+
+            vel[j] = np.array([np.cos(th),np.sin(th)])
+        pos[j] += k*vel[j]
+        pos[j] = np.mod(pos[j],L)
+    return(pos,vel)
+
+@njit(parallel=True) 
+def Update(N,L,k,Std,num,depStr,pos,xm,ym,intDelta,meshsize,boundaryCutoff):    
+    
+    f = np.zeros((N,N),dtype=float32)
+    #f = np.zeros((N,N))
+    for i in prange(num):
+        Str = depStr[i]
+        p = pos[i]
+        A, B, C, D = 0,0,0,0
+        centerX = int((meshsize-1)*p[0]/L+0.5)
+        centerY = int((meshsize-1)*p[1]/L+0.5)
+        lowerX      = max(0,centerX-intDelta)
+        lowerXplus  = max(0,centerX-intDelta + (meshsize-1))
+        lowerXminus = max(0,centerX-intDelta - (meshsize-1))
+        upperX      = min(meshsize,centerX+intDelta)
+        upperXplus  = min(meshsize,centerX+intDelta + (meshsize-1))
+        upperXminus = min(meshsize,centerX+intDelta - (meshsize-1))
+        lowerY      = max(0,centerY-intDelta)
+        lowerYplus  = max(0,centerY-intDelta + (meshsize-1))
+        lowerYminus = max(0,centerY-intDelta - (meshsize-1))
+        upperY      = min(meshsize,centerY+intDelta)
+        upperYplus  = min(meshsize,centerY+intDelta + (meshsize-1))
+        upperYminus = min(meshsize,centerY+intDelta - (meshsize-1))
+        sliceX = slice(lowerX,upperX+1)
+        sliceY = slice(lowerY,upperY+1)
+        f[sliceY,sliceX] += Str*(1/(4*pi*Std))*exp(-((xm[sliceY,sliceX]-p[0])**2
+                               +(ym[sliceY,sliceX]-p[1])**2)/4/Std)
+        if ((p[0])**2<boundaryCutoff):
+            sliceX = slice(lowerXplus,upperXplus+1)
+            sliceY = slice(lowerY,upperY+1)
+            f[sliceY,sliceX] += Str*(1/(4*pi*Std))*exp(-((xm[sliceY,sliceX]-p[0]-L)**2
+                                           +(ym[sliceY,sliceX]-p[1])**2)/4/Std)
+            A = 1
+        if ((p[0]-L)**2<boundaryCutoff):
+            sliceX = slice(lowerXminus,upperXminus+1)
+            sliceY = slice(lowerY,upperY+1)
+            f[sliceY,sliceX] += Str*(1/(4*pi*Std))*exp(-((xm[sliceY,sliceX]-p[0]+L)**2
+                                       +(ym[sliceY,sliceX]-p[1])**2)/4/Std)
+            B = 1
+        if ((p[1])**2<boundaryCutoff):
+            sliceX = slice(lowerX,upperX+1)
+            sliceY = slice(lowerYplus,upperYplus+1)
+            f[sliceY,sliceX] += Str*(1/(4*pi*Std))*exp(-((xm[sliceY,sliceX]-p[0])**2
+                                    +(ym[sliceY,sliceX]-p[1]-L)**2)/4/Std)
+            C = 1
+        if ((p[1]-L)**2<boundaryCutoff):
+            sliceX = slice(lowerX,upperX+1)
+            sliceY = slice(lowerYminus,upperYminus+1)
+            f[sliceY,sliceX] += Str*(1/(4*pi*Std))*exp(-((xm[sliceY,sliceX]-p[0])**2
+                                +(ym[sliceY,sliceX]-p[1]+L)**2)/4/Std)
+            D = 1
+        if (A == 1 and C == 1): #Plankton in Lower Left Corner
+            sliceX = slice(lowerXplus,upperXplus+1)
+            sliceY = slice(lowerYplus,upperYplus+1)
+            f[sliceY,sliceX] += Str*(1/(4*pi*Std))*exp(-((xm[sliceY,sliceX]-p[0]-L)**2
+                                 +(ym[sliceY,sliceX]-p[1]-L)**2)/4/Std)
+        if (A == 1 and D == 1): #Plankton in Lower Left Corner
+            sliceX = slice(lowerXplus,upperXplus+1)
+            sliceY = slice(lowerYminus,upperYminus+1)
+            f[sliceY,sliceX] += Str*(1/(4*pi*Std))*exp(-((xm[sliceY,sliceX]-p[0]-L)**2
+                                   +(ym[sliceY,sliceX]-p[1]+L)**2)/4/Std)
+        elif (B == 1 and C == 1): #Plankton in Upper Right Corner
+            sliceX = slice(lowerXminus,upperXminus+1)
+            sliceY = slice(lowerYplus,upperYplus+1)
+            f[sliceY,sliceX] += Str*(1/(4*pi*Std))*exp(-((xm[sliceY,sliceX]-p[0]+L)**2
+                                    +(ym[sliceY,sliceX]-p[1]-L)**2)/4/Std)
+        elif (B == 1 and D == 1): #Plankton in Lower Right Corner
+            sliceX = slice(lowerXminus,upperXminus+1)
+            sliceY = slice(lowerYminus,upperYminus+1)
+            f[sliceY,sliceX] += Str*(1/(4*pi*Std))*exp(-((xm[sliceY,sliceX]-p[0]+L)**2
+                                    +(ym[sliceY,sliceX]-p[1]+L)**2)/4/Std)
+
+    f = f.reshape((N**2,))
+    return(f)
+
+@njit(parallel=True)
+def Calc_Dist(POS,L):
+    #find distance of every particle from particle j using periodic boundary conditions
+        posx = POS[:,0]
+        posy = POS[:,1]
+
+        Dists = np.zeros(len(posy),dtype=float32)
+
+        Dist0 = np.sqrt((posx[0] - posx)**2 + (posy[0] - posy)**2) #regular  
+        Dist1 = np.sqrt((posx[0]  - L - posx)**2 + (posy[0] - posy + L)**2) #topleft
+        Dist2 = np.sqrt((posx[0]  - posx)**2 + (posy[0] - posy + L)**2) #topcenter
+        Dist3 = np.sqrt((posx[0]  + L - posx)**2 + (posy[0] - posy + L)**2) #topright
+        Dist4 = np.sqrt((posx[0]  - L - posx)**2 + (posy[0] - posy)**2) #middleleft
+        Dist5 = np.sqrt((posx[0]  + L - posx)**2 + (posy[0] - posy)**2) #middleright
+        Dist6 = np.sqrt((posx[0]  - L - posx)**2 + (posy[0] - posy - L)**2) #bottomleft
+        Dist7 = np.sqrt((posx[0]  - posx)**2 + (posy[0] - posy - L)**2) #bottomcenter
+        Dist8 = np.sqrt((posx[0]  + L - posx)**2 + (posy[0] - posy - L)**2) #bottomright
+
+        for k in prange(len(Dist0)):
+                Dists[k] = min(Dist0[k],Dist1[k],Dist2[k],
+                     Dist3[k],Dist4[k],Dist5[k],
+                     Dist6[k],Dist7[k],Dist8[k])
+        return(Dists)
+```
+
+```{python}
+meshsize = 400  #Chemical Mesh size
+numb = 160000  #Number of plankton in simulation
+LL = 10 #Length of domain [0,L] x [0,L]
+dt = 0.01 #Time-stepping size
+TotalTime = 300 #Total non-dimensional time 
+simTime = int(TotalTime/dt) #Number of timesteps in order to achieve total Time 
+
+Means = np.linspace(.75,np.pi-.75,15,dtype=float)
+
+Vs = [4,7,10]
+
+binsize=500
+loops = 10
+BinsC = np.zeros((4,binsize,len(Vs)))
+
+for Turn in range(1,5):
+    
+    for K in range(len(Vs)):
+        
+        #Uniform Distribution
+        if (Turn == 1):
+            Mu = Means[Vs[K]]
+            tvv = np.array([Mu-.75,Mu+.75])
+            
+        #Symmetric Triangular Distribution
+        if (Turn == 2):
+            Mu = Means[Vs[K]]
+            Std = .75*np.sqrt(2)
+            tvv = np.array([Mu-Std,Mu,Mu+Std])
+        
+        #Asymmetric Triangular Distribution
+        if (Turn == 3):
+            if (K == 0):
+                tvv = np.array([np.pi/11,.99947,2.372])
+            if (K == 1):
+                tvv = np.array([.874,1.047,2.791])
+            if (K == 2):
+                tvv = np.array([np.pi/3,1.6185,3.102])
+                
+        #Von Mises Distribution
+        if (Turn == 4):
+            Mu = Means[Vs[K]]
+            if (K == 0):
+                kappa = 5.89063
+            if (K == 1):
+                kappa = 5.84
+            if (K == 2):
+                kappa = 5.6489
+            tvv = np.array([Mu,kappa])
+
+            
+        for Jobs in range(loops):
+
+            SM = PS.Plankton(DP.constantDep,d1=.1,d2=4,N = meshsize,depMaxStr=.01,
+                        Const=3,L=LL,k=dt,delta=1e-3,depThreshold=0.012, 
+                    depTransWidth=0.008, num = numb, c0=0.01)
+
+            SM.SetIC(initial_conditions)
+
+            lenn = int(np.sqrt(numb))
+            pos = np.zeros((1,2))
+            vel = np.zeros((1,2))
+
+            #Place plankton down uniformly throughout the domain and give each a direction to travel initially
+            for l in range(0,lenn):
+                for k in range(0,lenn):
+                    pos = np.append(pos,[np.array([np.mod(k*(SM.L*1/(lenn)) + 0.5*(SM.L*1/(lenn)),SM.L),
+                            np.mod(l*(SM.L*1/(lenn)) + 0.5*(SM.L*1/(lenn)),SM.L)])],axis=0)
+                    th  = rand()*2*pi
+                    vel = np.append(vel,[np.array([np.cos(th),np.sin(th)])],axis=0)
+
+            pos = np.delete(pos,0,0)
+            vel = np.delete(vel,0,0)
+            pos_store = list([pos[:,:]])
+            pos_store = list([np.array(pos)])
+            scalar_store = list([SM.Meshed()])
+
+            CHEM = np.zeros((2,meshsize,meshsize))
+            POS = np.zeros((2,numb,2))
+            CHEM[1,:,:] = scalar_store[0] #preallocate the chemical 
+            POS[1,:,:] = pos_store[0] #preallocate the plankton
+
+            boundaryCutoff = 64*SM.depVar
+            intDelta = int((SM.N - 1)*8*np.sqrt(SM.depVar)/SM.L+0.5)
+            Std = SM.depVar
+            meshsize = SM.N
+            PlankDensity = SM.density*SM.L**2/SM.num
+
+            LU = sla.splu(SM.M1.tocsc())
+
+            for k in range(1,simTime):
+
+                SM.BuildPeriodic()
+                c = scalarInterp(SM.x_periodic,SM.y_periodic,SM.scalar_periodic,pos)
+                SM.BuildPeriodic()
+                grad_c = scalarGrad(SM.L,SM.x_periodic,SM.y_periodic,SM.scalar_periodic,pos)
+
+                pos,vel = RTTK(SM.k,SM.delta,SM.L,pos,vel,c,grad_c,Turn,tvv)
+
+                depStr = SM.depFcn(c,SM.depMaxStr,SM.depThreshold,SM.depTransWidth)
+
+                f = Update(SM.N,SM.L,SM.k,Std,SM.num,depStr,pos,SM.xm,SM.ym,intDelta,meshsize,boundaryCutoff)
+
+                SM.scalar = LU.solve(SM.M2.dot(SM.scalar)+SM.k*(PlankDensity)*f)
+
+                CHEM[0,:,:] = CHEM[1]
+                CHEM[1,:,:] = SM.Meshed()
+                POS[0,:,:] = POS[1]
+                POS[1,:,:] = pos
+            for j in range(SM.N):
+                Dists = np.delete(Calc_Dist(POS[1,j:,j:],LL),0,0)
+                FN = np.histogram(Dists,bins=binsize,range=(0.00001,LL),density=False)
+                BinsC[Turn-1,:,K] += FN[0]
+                
+        NN = SM.N
+        Area = 2*NN*pi/(LL**2)
+        BinsC[Turn-1,:,K] = np.divide(BinsC[Turn-1,:,K],
+                                      loops*(FN[1][1]-FN[1][0])*Area*(FN[1][1:]+FN[1][:-1])/2*(NN - 1)/2)
+```
+
+```{python}
+meshsize = 400  #Chemical Mesh size
+numb = 160000  #Number of plankton in simulation
+LL = 10 #Length of domain [0,L] x [0,L]
+dt = 0.01 #Time-stepping size
+TotalTime = 300 #Total non-dimensional time 
+simTime = int(TotalTime/dt) #Number of timesteps in order to achieve total Time 
+
+Means = np.linspace(.75,np.pi-.75,15,dtype=float)
+
+Vs = [4,7,10]
+
+binsize=500
+loops = 10
+BinsL = np.zeros((4,binsize,len(Vs)))
+
+for Turn in range(1,5):
+    
+    for K in range(len(Vs)):
+        
+        #Uniform Distribution
+        if (Turn == 1):
+            Mu = Means[Vs[K]]
+            tvv = np.array([Mu-.75,Mu+.75])
+            
+        #Symmetric Triangular Distribution
+        if (Turn == 2):
+            Mu = Means[Vs[K]]
+            Std = .75*np.sqrt(2)
+            tvv = np.array([Mu-Std,Mu,Mu+Std])
+        
+        #Asymmetric Triangular Distribution
+        if (Turn == 3):
+            if (K == 0):
+                tvv = np.array([np.pi/11,.99947,2.372])
+            if (K == 1):
+                tvv = np.array([.874,1.047,2.791])
+            if (K == 2):
+                tvv = np.array([np.pi/3,1.6185,3.102])
+                
+        #Von Mises Distribution
+        if (Turn == 4):
+            Mu = Means[Vs[K]]
+            if (K == 0):
+                kappa = 5.89063
+            if (K == 1):
+                kappa = 5.84
+            if (K == 2):
+                kappa = 5.6489
+            tvv = np.array([Mu,kappa])
+
+            
+        for Jobs in range(loops):
+
+            SM = PS.Plankton(DP.linAtanDep,d1=.1,d2=4,N = meshsize,depMaxStr=.01,
+                           Const=3,L=LL,k=dt,delta=1e-3,depThreshold=0.012, 
+                           depTransWidth=0.008, num = numb, c0=0.01)
+
+            SM.SetIC(initial_conditions)
+
+            lenn = int(np.sqrt(numb))
+            pos = np.zeros((1,2))
+            vel = np.zeros((1,2))
+
+            #Place plankton down uniformly throughout the domain and give each a direction to travel initially
+            for l in range(0,lenn):
+                for k in range(0,lenn):
+                    pos = np.append(pos,[np.array([np.mod(k*(SM.L*1/(lenn)) + 0.5*(SM.L*1/(lenn)),SM.L),
+                            np.mod(l*(SM.L*1/(lenn)) + 0.5*(SM.L*1/(lenn)),SM.L)])],axis=0)
+                    th  = rand()*2*pi
+                    vel = np.append(vel,[np.array([np.cos(th),np.sin(th)])],axis=0)
+
+            pos = np.delete(pos,0,0)
+            vel = np.delete(vel,0,0)
+            pos_store = list([pos[:,:]])
+            pos_store = list([np.array(pos)])
+            scalar_store = list([SM.Meshed()])
+
+            CHEM = np.zeros((2,meshsize,meshsize))
+            POS = np.zeros((2,numb,2))
+            CHEM[1,:,:] = scalar_store[0] #preallocate the chemical 
+            POS[1,:,:] = pos_store[0] #preallocate the plankton
+
+            boundaryCutoff = 64*SM.depVar
+            intDelta = int((SM.N - 1)*8*np.sqrt(SM.depVar)/SM.L+0.5)
+            Std = SM.depVar
+            meshsize = SM.N
+            PlankDensity = SM.density*SM.L**2/SM.num
+
+            LU = sla.splu(SM.M1.tocsc())
+
+            for k in range(1,simTime):
+
+                SM.BuildPeriodic()
+                c = scalarInterp(SM.x_periodic,SM.y_periodic,SM.scalar_periodic,pos)
+                SM.BuildPeriodic()
+                grad_c = scalarGrad(SM.L,SM.x_periodic,SM.y_periodic,SM.scalar_periodic,pos)
+
+                pos,vel = RTTK(SM.k,SM.delta,SM.L,pos,vel,c,grad_c,Turn,tvv)
+
+                depStr = SM.depFcn(c,SM.depMaxStr,SM.depThreshold,SM.depTransWidth)
+
+                f = Update(SM.N,SM.L,SM.k,Std,SM.num,depStr,pos,SM.xm,SM.ym,intDelta,meshsize,boundaryCutoff)
+
+                SM.scalar = LU.solve(SM.M2.dot(SM.scalar)+SM.k*(PlankDensity)*f)
+
+                CHEM[0,:,:] = CHEM[1]
+                CHEM[1,:,:] = SM.Meshed()
+                POS[0,:,:] = POS[1]
+                POS[1,:,:] = pos
+
+            for j in range(SM.N):
+                Dists = np.delete(Calc_Dist(POS[1,j:,j:],LL),0,0)
+                FN = np.histogram(Dists,bins=binsize,range=(0.00001,LL),density=False)
+                BinsL[Turn-1,:,K] += FN[0]
+                
+        NN = SM.N
+        Area = 2*NN*pi/(LL**2)
+        BinsL[Turn-1,:,K] = np.divide(BinsL[Turn-1,:,K],
+                                      loops*(FN[1][1]-FN[1][0])*Area*(FN[1][1:]+FN[1][:-1])/2*(NN - 1)/2)
+```
+
+## Fig 5.12a - RDF at $t = 300$ for varied turning kernels with equal mean and variance with deposition function $f_1$
+
+```{python}
+GR = (1 + np.sqrt(5))/2
+fig, axs = plt.subplots(figsize = (15,6),nrows = 1, ncols = 3, sharey = 'row', sharex = 'row',tight_layout=True)
+
+fig.subplots_adjust(hspace=0.4, wspace=0.13)
+colors = ['#DC267F','#785EF0','#FE6100','#648FFF'] #Using IBM Colorblind Scheme 
+markers = ['D','p','s','^']
+linestyles=[':','--','-.','-']
+params = {'legend.fontsize': 15,'legend.framealpha':1}
+plt.rcParams.update(params)
+
+Means = np.linspace(.75,np.pi-.75,15)
+
+Vs = [4,7,10]
+
+for i in range(len(Vs)):
+    for j in range(4):
+        A = BinsC[j,:,i]
+        AN = A[:int(len(A)/2)]
+        Lengs = np.linspace(0,5,len(AN))
+        axs[i].plot(Lengs,AN,color=colors[j],linestyle = linestyles[j],linewidth=3.5,
+           label=r'$P_{0}$'.format(j+1),marker=markers[j],markevery=50,
+                    markersize=12,alpha=.8)
+
+ 
+    axs[i].set_title(r'Mean $= {0}$'.format(round(Means[Vs[i]],3)),fontsize=20,pad=1)
+
+    axs[i].axhline(1,linestyle='--',linewidth=3,color='k',alpha=.5)
+    axs[i].tick_params(which='both',labelsize=18,direction='in',length=10)
+    axs[i].locator_params(nbins=5,axis='x')
+    axs[i].locator_params(nbins=4,axis='y')
+    axs[i].set_xlabel(r'$r$',fontsize=20)
+    axs[i].set_xlim(0,5)
+    axs[i].legend(fontsize=20)
+    
+axs[0].set_ylabel(r'$g(r)$ for $f_1(c)$ at $t = 300$',fontsize=20)
+
+plt.savefig('./Figures/Fig5_12a.png')
+```
+
+## Fig 5.12b - RDF at $t = 300$ for varied turning kernels with equal mean and variance with deposition function $f_3$
+
+```{python}
+GR = (1 + np.sqrt(5))/2
+fig, axs = plt.subplots(figsize = (15,6),nrows = 1, ncols = 3, sharey = 'row', sharex = 'row',tight_layout=True)
+
+fig.subplots_adjust(hspace=0.4, wspace=0.13)
+colors = ['#DC267F','#785EF0','#FE6100','#648FFF'] #Using IBM Colorblind Scheme 
+markers = ['D','p','s','^']
+linestyles=[':','--','-.','-']
+params = {'legend.fontsize': 15,'legend.framealpha':1}
+plt.rcParams.update(params)
+
+Means = np.linspace(.75,np.pi-.75,15)
+
+Vs = [4,7,10]
+
+for i in range(len(Vs)):
+    for j in range(4):
+        A = BinsL[j,:,i]
+        AN = A[:int(len(A)/2)]
+        Lengs = np.linspace(0,5,len(AN))
+        axs[i].plot(Lengs,AN,color=colors[j],linestyle = linestyles[j],linewidth=3.5,
+           label=r'$P_{0}$'.format(j+1),marker=markers[j],markevery=50,
+                    markersize=12,alpha=.8)
+
+ 
+    axs[i].set_title(r'Mean $= {0}$'.format(round(Means[Vs[i]],3)),fontsize=20,pad=1)
+
+    axs[i].axhline(1,linestyle='--',linewidth=3,color='k',alpha=.5)
+    axs[i].tick_params(which='both',labelsize=18,direction='in',length=10)
+    axs[i].locator_params(nbins=5,axis='x')
+    axs[i].locator_params(nbins=4,axis='y')
+    axs[i].set_xlabel(r'$r$',fontsize=20)
+    axs[i].set_xlim(0,5)
+    axs[i].legend(fontsize=20)
+    
+axs[0].set_ylabel(r'$g(r)$ for $f_3(c)$ at $t = 300$',fontsize=20)
+
+plt.savefig('./Figures/Fig5_12b.png')
+```
